@@ -176,6 +176,7 @@ cython_debug/
 
 data/
 NotTheStallion/
+OpenRLHF/
 qwen2*/
 verl/
 wandb/
