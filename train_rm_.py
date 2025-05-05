@@ -5,16 +5,23 @@ from datetime import datetime
 
 from transformers.trainer import get_scheduler
 
-from OpenRLHF.openrlhf.datasets import RewardDataset
-from OpenRLHF.openrlhf.models import get_llm_for_sequence_regression
-from OpenRLHF.openrlhf.trainer import RewardModelTrainer
-from OpenRLHF.openrlhf.utils import blending_datasets, get_strategy, get_tokenizer
+from dataset.reward_dataset import RewardDataset
+from models.model import get_llm_for_sequence_regression
+from trainer.rm_trainer import RewardModelTrainer
+from utils.utils import blending_datasets, get_strategy, get_tokenizer
+
+
+from torch.optim import Adam
+from models.actor import Actor
+from pprint import pprint
+from torch.utils.data import DataLoader
+
+
 
 
 def train(args):
     strategy = None
-    
-    
+    print("="*20)
     # configure model
     # load huggingface model/config
     model = get_llm_for_sequence_regression(
@@ -27,19 +34,33 @@ def train(args):
         lora_alpha=args.lora_alpha,
         target_modules=args.target_modules,
         lora_dropout=args.lora_dropout,
-        ds_config=strategy.get_ds_train_config(is_actor=False),
         init_value_head=True,
         value_head_prefix=args.value_head_prefix,
         packing_samples=args.packing_samples,
+        device_map="auto"
     )
+
+    print("Model loaded successfully")
+    print(model)
+
 
     # configure tokenizer
     tokenizer = get_tokenizer(args.pretrain, model, "left", strategy, use_fast=not args.disable_fast_tokenizer)
-
-    print(model)
+    
+    print("Tokenizer loaded successfully")
+    
+    print(model.model.parameters())
 
     # configure optimizer
-    optim = strategy.create_optimizer(model, lr=args.learning_rate, betas=args.adam_betas, weight_decay=args.l2)
+    # optim = strategy.create_optimizer(model, lr=args.learning_rate, betas=args.adam_betas, weight_decay=args.l2)
+    optim = Adam(
+        model.model.parameters() if isinstance(model, Actor) else model.parameters(),
+        lr=args.learning_rate,
+        betas=args.adam_betas,
+        weight_decay=args.l2
+    )
+    
+    print("Optimizer created successfully")
 
     # prepare for data and dataset
     train_data = blending_datasets(
@@ -50,24 +71,38 @@ def train(args):
         max_count=args.max_samples,
         dataset_split=args.dataset_split,
     )
+    
+    print("Training data loaded successfully")
+    pprint(train_data[0])
 
     train_data = train_data.select(range(min(args.max_samples, len(train_data))))
     train_dataset = RewardDataset(
         train_data,
         tokenizer,
         args.max_len,
-        strategy,
+        args,
         input_template=args.input_template,
     )
+    
+    print("Training dataset created successfully")
+    pprint(train_dataset[0])
 
     # prepare dataloader
-    train_dataloader = strategy.setup_dataloader(
+    # train_dataloader = strategy.setup_dataloader(
+    #     train_dataset,
+    #     args.micro_train_batch_size,
+    #     True,
+    #     True,
+    #     train_dataset.collate_fn,
+    # )
+    train_dataloader = DataLoader(
         train_dataset,
-        args.micro_train_batch_size,
-        True,
-        True,
-        train_dataset.collate_fn,
+        batch_size=args.micro_train_batch_size,
+        shuffle=True,
+        drop_last=True,
+        collate_fn=train_dataset.collate_fn,
     )
+    print("Train dataloader set up successfully")
 
     if getattr(args, "eval_dataset", None):
         eval_data = blending_datasets(
@@ -84,20 +119,22 @@ def train(args):
         eval_data,
         tokenizer,
         args.max_len,
-        strategy,
+        args,
         input_template=args.input_template,
     )
-    eval_dataloader = strategy.setup_dataloader(
+    eval_dataloader = DataLoader(
         eval_dataset,
-        args.micro_train_batch_size,
-        True,
-        False,
-        eval_dataset.collate_fn,
+        batch_size=args.micro_train_batch_size,
+        shuffle=False,
+        drop_last=False,
+        collate_fn=eval_dataset.collate_fn,
     )
+    
 
     # scheduler
     num_update_steps_per_epoch = len(train_dataset) // args.train_batch_size
     max_steps = math.ceil(args.max_epochs * num_update_steps_per_epoch)
+    print(f"=== Max steps: {max_steps}, num_update_steps_per_epoch: {num_update_steps_per_epoch}")
 
     scheduler = get_scheduler(
         "cosine_with_min_lr",
@@ -113,15 +150,15 @@ def train(args):
             gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
         )
 
-    # strategy prepare
-    (model, optim, scheduler) = strategy.prepare((model, optim, scheduler))
+    # # strategy prepare
+    # (model, optim, scheduler) = strategy.prepare((model, optim, scheduler))
 
     # load checkpoint
     consumed_samples = 0
-    if args.load_checkpoint and os.path.exists(args.ckpt_path):
-        _, states = strategy.load_ckpt(model, args.ckpt_path)
-        consumed_samples = states["consumed_samples"]
-        strategy.print(f"Loaded the checkpoint: {args.ckpt_path}, consumed_samples: {consumed_samples}")
+    # if args.load_checkpoint and os.path.exists(args.ckpt_path):
+    #     _, states = strategy.load_ckpt(model, args.ckpt_path)
+    #     consumed_samples = states["consumed_samples"]
+    #     strategy.print(f"Loaded the checkpoint: {args.ckpt_path}, consumed_samples: {consumed_samples}")
 
     os.makedirs(args.save_path, exist_ok=True)
 
@@ -129,7 +166,7 @@ def train(args):
     # we use merged chosen + rejected response forward
     trainer = RewardModelTrainer(
         model=model,
-        strategy=strategy,
+        strategy_args=args,
         optim=optim,
         tokenizer=tokenizer,
         train_dataloader=train_dataloader,
@@ -140,15 +177,17 @@ def train(args):
         loss=args.loss,
     )
 
+    print("Trainer created successfully [LET THE TRAINING BEGIN]")
+
     trainer.fit(args, consumed_samples, num_update_steps_per_epoch)
 
-    # Save value_head_prefix
-    strategy.print("Save value_head_prefix in config")
-    unwrap_model = strategy._unwrap_model(model)
-    unwrap_model.config.value_head_prefix = args.value_head_prefix
+    # # Save value_head_prefix
+    # strategy.print("Save value_head_prefix in config")
+    # unwrap_model = strategy._unwrap_model(model)
+    # unwrap_model.config.value_head_prefix = args.value_head_prefix
 
-    # save model checkpoint after fitting on only rank0
-    strategy.save_model(model, tokenizer, args.save_path)
+    # # save model checkpoint after fitting on only rank0
+    # strategy.save_model(model, tokenizer, args.save_path)
 
 
 if __name__ == "__main__":
@@ -189,7 +228,7 @@ if __name__ == "__main__":
     parser.add_argument("--ds_tensor_parallel_size", type=int, default=1, help="DeepSpeed Tensor parallel size")
 
     # Models
-    parser.add_argument("--pretrain", type=str, default=None)
+    parser.add_argument("--pretrain", type=str, default="OpenRLHF/Llama-3-8b-sft-mixture")
     parser.add_argument("--value_head_prefix", type=str, default="score")
 
     # Context Parallel
@@ -227,7 +266,7 @@ if __name__ == "__main__":
     parser.add_argument("--packing_samples", action="store_true", default=False)
 
     # Custom dataset
-    parser.add_argument("--dataset", type=str, default=None, help="Path to the training dataset")
+    parser.add_argument("--dataset", type=str, default="OpenRLHF/preference_dataset_mixture2_and_safe_pku", help="Path to the training dataset")
     parser.add_argument("--dataset_probs", type=str, default=None, help="Sampling probabilities for training datasets")
     parser.add_argument("--eval_dataset", type=str, default=None, help="Path to the evaluation dataset")
     parser.add_argument("--dataset_split", type=str, default="train")
@@ -261,6 +300,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_ms", action="store_true", default=False)
 
     args = parser.parse_args()
+    
 
     if args.input_template and "{}" not in args.input_template:
         print("[Warning] {} not in args.input_template, set to None")
