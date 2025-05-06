@@ -11,6 +11,10 @@ from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from .ring_attn_utils import gather_and_pad_tensor, unpad_and_slice_tensor
 from .utils import compute_entropy, log_probs_from_logits, process_sequences
 
+import os
+
+
+
 compute_entropy = torch.compile(compute_entropy)
 
 
@@ -79,7 +83,6 @@ class Actor(nn.Module):
 
             if use_liger_kernel:
                 from liger_kernel.transformers import AutoLigerKernelForCausalLM
-
                 model_class = AutoLigerKernelForCausalLM
             else:
                 model_class = AutoModelForCausalLM
@@ -91,6 +94,7 @@ class Actor(nn.Module):
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else "auto",
                 device_map=device_map,
+                cache_dir=os.getenv("CACHE_DIR", None),
             )
 
             # LoRA

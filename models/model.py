@@ -12,6 +12,9 @@ from utils.logging_utils import init_logger
 
 from models.ring_attn_utils import gather_and_pad_tensor, unpad_and_slice_tensor
 
+import os
+
+
 logger = init_logger(__name__)
 
 
@@ -64,7 +67,7 @@ def get_llm_for_sequence_regression(
         model_type == "critic" or model_type == "reward"
     ), f"invalid model_type: {model_type}, should be critic or reward."
 
-    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True, cache_dir=os.getenv("CACHE_DIR", None))
     config.normalize_reward = normalize_reward
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
 
@@ -104,6 +107,7 @@ def get_llm_for_sequence_regression(
         torch_dtype=torch.bfloat16 if bf16 else "auto",
         quantization_config=nf4_config,
         device_map=device_map,
+        cache_dir=os.getenv("CACHE_DIR", None),
         **kwargs,
     )
 
