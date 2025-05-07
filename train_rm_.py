@@ -11,12 +11,70 @@ from trainer.rm_trainer import RewardModelTrainer
 from utils.utils import blending_datasets, get_strategy, get_tokenizer
 
 
+
+
 from torch.optim import Adam
 from models.actor import Actor
 from pprint import pprint
 from torch.utils.data import DataLoader
+from torch import nn
+from huggingface_hub import HfApi, HfFolder
+from huggingface_hub import create_repo, HfApi, HfFolder
 
 
+def _unwrap_model(model) -> nn.Module:
+        if isinstance(model, Actor):
+            return _unwrap_model(model.model)
+        elif hasattr(model, "module"):
+            return model.module
+        else:
+            return model
+
+def save_model(model: nn.Module, tokenizer, output_dir, **kwargs) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+
+    # get state dict (no ZeRO or tensor parallelism considerations needed)
+    output_state_dict = model.state_dict()
+
+    state_dict = model.state_dict()
+    state_dict_keys = set(state_dict.keys())
+    output_state_dict_keys = set(output_state_dict.keys())
+
+    # corner case for tie_word_embeddings, such as Qwen2-0.5B
+    if getattr(model.config, "tie_word_embeddings", False) and "lm_head.weight" in state_dict_keys:
+        state_dict_keys.remove("lm_head.weight")
+
+    assert state_dict_keys.issubset(
+        output_state_dict_keys
+    ), f"mismatch keys {output_state_dict_keys.symmetric_difference(state_dict_keys)}"
+
+    # save model
+    model.save_pretrained(output_dir, state_dict=output_state_dict, **kwargs)
+
+    # save config
+    output_config_file = os.path.join(output_dir, "config.json")
+    model.config.to_json_file(output_config_file)
+    # save tokenizer
+    tokenizer.save_pretrained(output_dir)
+
+    # # Push to Hugging Face Hub
+    # repo_id = kwargs.get("repo_id", "NotTheStallion/LLama-3-8b-sft-mixture-RM")
+    # api = HfApi()
+    # token = HfFolder.get_token()
+
+    # # Create the repository if it doesn't exist
+    # try:
+    #     create_repo(repo_id, token=token, repo_type="model", exist_ok=True)
+    # except Exception as e:
+    #     print(f"Error creating repository: {e}")
+
+    # # Upload the folder to the repository
+    # api.upload_folder(
+    #     folder_path=output_dir,
+    #     repo_id=repo_id,
+    #     token=token,
+    #     repo_type="model"
+    # )
 
 
 def train(args):
@@ -42,6 +100,7 @@ def train(args):
 
     print("Model loaded successfully")
     print(model)
+    
 
 
     # configure tokenizer
@@ -159,8 +218,10 @@ def train(args):
     #     _, states = strategy.load_ckpt(model, args.ckpt_path)
     #     consumed_samples = states["consumed_samples"]
     #     strategy.print(f"Loaded the checkpoint: {args.ckpt_path}, consumed_samples: {consumed_samples}")
-
+    
+    
     os.makedirs(args.save_path, exist_ok=True)
+
 
     # batch_size here is micro_batch_size * 2
     # we use merged chosen + rejected response forward
@@ -181,13 +242,13 @@ def train(args):
 
     trainer.fit(args, consumed_samples, num_update_steps_per_epoch)
 
-    # # Save value_head_prefix
-    # strategy.print("Save value_head_prefix in config")
-    # unwrap_model = strategy._unwrap_model(model)
-    # unwrap_model.config.value_head_prefix = args.value_head_prefix
+    # Save value_head_prefix
+    print("Save value_head_prefix in config")
+    unwrap_model = _unwrap_model(model)
+    unwrap_model.config.value_head_prefix = args.value_head_prefix
 
-    # # save model checkpoint after fitting on only rank0
-    # strategy.save_model(model, tokenizer, args.save_path)
+    # save model checkpoint after fitting on only rank0
+    save_model(model, tokenizer, args.save_path)
 
 
 if __name__ == "__main__":
