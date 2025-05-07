@@ -181,17 +181,29 @@ class RewardModelTrainer(ABC):
                 step_bar.update()
 
                 # logs/checkpoints/evaluation
-                if step % accumulated_gradient == 0:
-                    logs_dict["loss_mean"] = loss_sum / accumulated_gradient
-                    logs_dict["acc_mean"] = acc_sum / accumulated_gradient
-                    loss_sum = 0
-                    acc_sum = 0
-                    global_step = step // accumulated_gradient
-                    client_states = {"consumed_samples": global_step * args.train_batch_size}
-                    self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+                # print(f"step: {step}, accumulated_gradient: {accumulated_gradient}, loss_sum: {loss_sum}, acc_sum: {acc_sum}")
+                # if step % accumulated_gradient == 0:
+                #     logs_dict["loss_mean"] = loss_sum / accumulated_gradient
+                #     logs_dict["acc_mean"] = acc_sum / accumulated_gradient
+                #     loss_sum = 0
+                #     acc_sum = 0
+                #     global_step = step // accumulated_gradient
+                #     client_states = {"consumed_samples": global_step * args.train_batch_size}
+                #     self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+                    
+                if self._wandb is not None:
+                    self._wandb.log({"loss": logs_dict["loss"]})
+                    self._wandb.log({"acc": logs_dict["acc"]})
+                    self._wandb.log({"chosen_reward": logs_dict["chosen_reward"]})
+                    self._wandb.log({"reject_reward": logs_dict["reject_reward"]})
+                    self._wandb.log({"lr": logs_dict["lr"]})
 
                 step += 1
             epoch_bar.update()
+            if self._wandb is not None:
+                self._wandb.log({"loss_mean": loss_sum / len(self.train_dataloader)})
+                self._wandb.log({"acc_mean": acc_sum / len(self.train_dataloader)})
+            
 
         if self._wandb is not None:
             self._wandb.finish()
@@ -305,21 +317,21 @@ class RewardModelTrainer(ABC):
 
         We do this to avoid doing two forward passes, because it's faster for FSDP.
         """
-        # Determine the device of the model
-        model_device = next(model.parameters()).device
+        # # Determine the device of the model
+        # model_device = next(model.parameters()).device
 
-        # Check the device of the inputs
-        chosen_ids_device = chosen_ids.device
-        c_mask_device = c_mask.device
-        reject_ids_device = reject_ids.device
-        r_mask_device = r_mask.device
+        # # Check the device of the inputs
+        # chosen_ids_device = chosen_ids.device
+        # c_mask_device = c_mask.device
+        # reject_ids_device = reject_ids.device
+        # r_mask_device = r_mask.device
 
-        # Print or log the devices if needed
-        print(f"Model is on device: {model_device}")
-        print(f"chosen_ids is on device: {chosen_ids_device}")
-        print(f"c_mask is on device: {c_mask_device}")
-        print(f"reject_ids is on device: {reject_ids_device}")
-        print(f"r_mask is on device: {r_mask_device}")
+        # # Print or log the devices if needed
+        # print(f"Model is on device: {model_device}")
+        # print(f"chosen_ids is on device: {chosen_ids_device}")
+        # print(f"c_mask is on device: {c_mask_device}")
+        # print(f"reject_ids is on device: {reject_ids_device}")
+        # print(f"r_mask is on device: {r_mask_device}")
         
         
         input_ids, att_masks = self.concatenated_inputs(chosen_ids, c_mask, reject_ids, r_mask)
