@@ -179,12 +179,12 @@ def train(args):
     # # init PPO trainer (Single controller)
     ppo_trainer = PPOTrainer(
         args.pretrain,
-        strategy,
+        args,
         actor_model,
         critic_model,
         reward_model,
         ref_model,
-        vllm_engines,
+        None,
         prompt_split=args.prompt_split,
         eval_split=args.eval_split,
         # generate kwargs
@@ -195,8 +195,13 @@ def train(args):
         temperature=args.temperature,
         top_p=args.top_p,
     )
+    
+    print(f"ppo_trainer set ... OK")
+    
     # # training update steps
     # max_steps = ray.get(ppo_trainer.get_max_steps.remote())
+    max_steps = ppo_trainer.get_max_steps()
+    print(f"max_steps: {max_steps}")
 
     # # init reference/reward/actor model
     # refs = []
@@ -215,6 +220,7 @@ def train(args):
 
     # # train actor and critic model
     # ray.get(ppo_trainer.fit.remote())
+    ppo_trainer.fit()
 
     # # save model
     # ray.get(actor_model.async_save_model())

@@ -28,7 +28,7 @@ class PPOTrainer(ABC):
     def __init__(
         self,
         pretrain: str,
-        strategy,
+        strategy_args,
         actor_model_group,
         critic_model_group,
         reward_model_group,
@@ -42,10 +42,10 @@ class PPOTrainer(ABC):
     ) -> None:
         super().__init__()
 
-        self.strategy = strategy
-        self.args = strategy.args
+        self.strategy = strategy_args
+        self.args = strategy_args
 
-        self.tokenizer = get_tokenizer(pretrain, None, "left", strategy, use_fast=not self.args.disable_fast_tokenizer)
+        self.tokenizer = get_tokenizer(pretrain, None, "left", self.strategy, use_fast=not self.args.disable_fast_tokenizer)
         self.actor_model_group = actor_model_group
         self.critic_model_group = critic_model_group
         self.reward_model_group = reward_model_group
@@ -80,10 +80,10 @@ class PPOTrainer(ABC):
             self.tokenizer,
             self.prompt_max_len,
             self.kl_ctl,
-            self.strategy,
+            self.args,
             self.remote_rm_url,
             vllm_engines=self.vllm_engines,
-            packing_samples=self.strategy.args.packing_samples,
+            packing_samples=self.args.packing_samples,
         )
 
         self.prepare_datasets()
@@ -92,18 +92,18 @@ class PPOTrainer(ABC):
         self._wandb = None
         self._tensorboard = None
         self.generated_samples_table = None
-        if self.strategy.args.use_wandb:
+        if self.args.use_wandb:
             import wandb
 
             self._wandb = wandb
             if not wandb.api.api_key:
-                wandb.login(key=self.strategy.args.use_wandb)
+                wandb.login(key=self.args.use_wandb)
             wandb.init(
-                entity=self.strategy.args.wandb_org,
-                project=self.strategy.args.wandb_project,
-                group=self.strategy.args.wandb_group,
-                name=self.strategy.args.wandb_run_name,
-                config=self.strategy.args.__dict__,
+                entity=self.args.wandb_org,
+                project=self.args.wandb_project,
+                group=self.args.wandb_group,
+                name=self.args.wandb_run_name,
+                config=self.args.__dict__,
                 reinit=True,
             )
 
@@ -114,16 +114,17 @@ class PPOTrainer(ABC):
             self.generated_samples_table = wandb.Table(columns=["global_step", "text", "reward"])
 
         # Initialize TensorBoard writer if wandb is not available
-        if self.strategy.args.use_tensorboard and self._wandb is None:
-            from torch.utils.tensorboard import SummaryWriter
+        # if self.strategy.args.use_tensorboard and self._wandb is None:
+        #     from torch.utils.tensorboard import SummaryWriter
 
-            os.makedirs(self.strategy.args.use_tensorboard, exist_ok=True)
-            log_dir = os.path.join(self.strategy.args.use_tensorboard, self.strategy.args.wandb_run_name)
-            self._tensorboard = SummaryWriter(log_dir=log_dir)
+        #     os.makedirs(self.strategy.args.use_tensorboard, exist_ok=True)
+        #     log_dir = os.path.join(self.strategy.args.use_tensorboard, self.strategy.args.wandb_run_name)
+        #     self._tensorboard = SummaryWriter(log_dir=log_dir)
 
     def fit(
         self,
     ) -> None:
+        # @note : This code only has the main loop for PPO training.
         args = self.args
 
         # Load datasets
@@ -180,6 +181,7 @@ class PPOTrainer(ABC):
                     )
                 ray.get(refs)
 
+                # @note : Real training of critic and actor in this function.
                 status = self.ppo_train(steps)
 
                 if "kl" in status:
@@ -201,6 +203,9 @@ class PPOTrainer(ABC):
             self._tensorboard.close()
 
     def ppo_train(self, global_steps):
+        """
+            This methods train the actor or critic depending on if we passed the steps to update actor.
+        """
         status = {}
 
         # triger remote critic model training
@@ -209,6 +214,7 @@ class PPOTrainer(ABC):
             if self.strategy.args.deepspeed_enable_sleep:
                 ray.get(self.critic_model_group.async_run_method(method_name="reload_states"))
 
+            # ! Training of critic model
             critic_status_ref = self.critic_model_group.async_run_method(method_name="fit")
 
             if self.strategy.args.colocate_all_models or self.strategy.args.deepspeed_enable_sleep:
@@ -221,6 +227,7 @@ class PPOTrainer(ABC):
             if self.strategy.args.deepspeed_enable_sleep:
                 self.actor_model_group.async_run_method(method_name="reload_states")
 
+            # ! Training of actor model
             actor_status_ref = self.actor_model_group.async_run_method(method_name="fit", kl_ctl=self.kl_ctl.value)
             status.update(ray.get(actor_status_ref)[0])
 
@@ -412,7 +419,7 @@ class PPOTrainer(ABC):
         train_data = blending_datasets(
             args.prompt_data,
             args.prompt_data_probs,
-            strategy,
+            None,
             args.seed,
             max_count=args.max_samples,
             dataset_split=self.prompt_split,
@@ -421,11 +428,17 @@ class PPOTrainer(ABC):
         # Create train dataset
         train_data = train_data.select(range(min(args.max_samples, len(train_data))))
         prompts_dataset = PromptDataset(train_data, self.tokenizer, strategy, input_template=args.input_template)
-        prompts_dataloader = strategy.setup_dataloader(
+        # prompts_dataloader = strategy.setup_dataloader(
+        #     prompts_dataset,
+        #     args.rollout_batch_size,
+        #     True,
+        #     True,
+        # )
+        prompts_dataloader = torch.utils.data.DataLoader(
             prompts_dataset,
-            args.rollout_batch_size,
-            True,
-            True,
+            batch_size=args.rollout_batch_size,
+            shuffle=True,
+            pin_memory=True
         )
 
         # Create eval dataset if eval data exists
@@ -438,7 +451,13 @@ class PPOTrainer(ABC):
             )
             eval_data = eval_data.select(range(min(args.max_samples, len(eval_data))))
             eval_dataset = PromptDataset(eval_data, self.tokenizer, strategy, input_template=args.input_template)
-            eval_dataloader = strategy.setup_dataloader(eval_dataset, 1, True, False)
+            # eval_dataloader = strategy.setup_dataloader(eval_dataset, 1, True, False)
+            eval_dataloader = torch.utils.data.DataLoader(
+                eval_dataset,
+                batch_size=1,
+                shuffle=False,
+                pin_memory=True
+            )
         else:
             eval_dataloader = None
 

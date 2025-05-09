@@ -32,18 +32,18 @@ class PromptDataset(Dataset):
         self,
         dataset,
         tokenizer,
-        strategy,
+        strategy_args,
         input_template=None,
     ) -> None:
         super().__init__()
-        self.strategy = strategy
+        self._args = strategy_args
         self.tokenizer = tokenizer
 
         # chat_template
         self.input_template = input_template
-        input_key = getattr(self.strategy.args, "input_key", None)
-        label_key = getattr(self.strategy.args, "label_key", None)
-        apply_chat_template = getattr(self.strategy.args, "apply_chat_template", False)
+        input_key = getattr(self._args, "input_key", None)
+        label_key = getattr(self._args, "label_key", None)
+        apply_chat_template = getattr(self._args, "apply_chat_template", False)
 
         if apply_chat_template:
             apply_chat_template = self.tokenizer.apply_chat_template
@@ -51,7 +51,7 @@ class PromptDataset(Dataset):
         self.prompts = []
         self.labels = []
         self.datasources = []
-        for data in tqdm(dataset, desc="Preprocessing data", disable=not self.strategy.is_rank_0()):
+        for data in tqdm(dataset, desc="Preprocessing data"):
             prompt, label = preprocess_data(data, input_template, input_key, label_key, apply_chat_template)
             self.prompts.append(prompt)
             self.labels.append(label)

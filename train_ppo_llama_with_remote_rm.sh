@@ -37,6 +37,7 @@ python3 train_ppo_ray.py \
    --critic_learning_rate 9e-6 \
    --init_kl_coef 0.01 \
    --prompt_data OpenRLHF/prompt-collection-v0.1 \
+   --max_samples 100 \
    --input_key context_messages \
    --apply_chat_template \
    --normalize_reward \

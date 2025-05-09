@@ -166,7 +166,7 @@ class RemoteExperienceMaker(ABC):
         tokenizer,
         prompt_max_len: int,
         kl_controller,
-        strategy=None,
+        strategy_args=None,
         remote_rm_url: Union[list[str], str] = None,
         vllm_engines: List = None,
         packing_samples=False,
@@ -183,9 +183,9 @@ class RemoteExperienceMaker(ABC):
         self.tokenizer = tokenizer
         self.prompt_max_len = prompt_max_len
         self.kl_ctl = kl_controller
-        self.strategy = strategy
-        self.advantage_estimator = strategy.args.advantage_estimator
-        self.args = strategy.args
+        self.strategy = None
+        self.advantage_estimator = strategy_args.advantage_estimator
+        self.args = strategy_args
 
         # custom reward func for reinforced finetuning
         self.custom_reward_func = None
