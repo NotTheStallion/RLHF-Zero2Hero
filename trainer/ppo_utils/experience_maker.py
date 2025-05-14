@@ -230,10 +230,10 @@ class RemoteExperienceMaker(ABC):
         Then, if we need certain processing for the rewards or do certain filtering, we can process the rollout as a whole.
         After that, we will calculate the advantages and returns for each experience.
         """
-        args = self.strategy.args
+        args = self.args
 
         # vLLM wakeup when vllm_enable_sleep
-        if self.strategy.args.vllm_enable_sleep:
+        if args.vllm_enable_sleep:
             from trainer.ray.vllm_engine import batch_vllm_engine_call
 
             batch_vllm_engine_call(self.vllm_engines, "wake_up")
@@ -241,7 +241,7 @@ class RemoteExperienceMaker(ABC):
         rollout_samples = self.generate_samples(all_prompts, all_labels, **generate_kwargs)
 
         # vLLM offload when vllm_enable_sleep
-        if self.strategy.args.vllm_enable_sleep:
+        if args.vllm_enable_sleep:
             batch_vllm_engine_call(self.vllm_engines, "sleep")
 
         # Make experiences (models forward: logprobs, values, rewards, and kl divergence)
@@ -259,125 +259,154 @@ class RemoteExperienceMaker(ABC):
         start_time = time.time()
         logger.info(f"🚀 Starting experience making with {len(samples_list[0].sequences) * len(samples_list)} batches")
 
-        args = self.strategy.args
+        args = self.args
         device = "cpu"
         experiences = []
 
         # Extract all information from samples in one pass
         # Convert samples into lists of tensors and metadata for batch processing
-        sequences_list = [s.sequences for s in samples_list]
-        attention_mask_list = [s.attention_mask for s in samples_list]
-        action_mask_list = [s.action_mask for s in samples_list]
-        prompts_list = [p for s in samples_list for p in s.prompts]
-        labels_list = [l for s in samples_list for l in s.labels]
+        
+        sequences_list = [s.sequences for s in samples_list][0]
+        attention_mask_list = [s.attention_mask for s in samples_list][0]
+        action_mask_list = [s.action_mask for s in samples_list][0]
+        prompts_list = [p for s in samples_list for p in s.prompts][0]
+        labels_list = [l for s in samples_list for l in s.labels][0]
+        
+        # print("HA"*20)
+        # print(sequences_list)
+        # print(sequences_list[0])
+        # print(attention_mask_list)
+        # print(torch.tensor([s.sequences for s in samples_list]))
 
         # Batch call reward model
         r_refs = None
         if not self.remote_rm_url:
-            r_refs = self.reward_model_group.async_run_method_batch(
-                method_name="forward",
-                sequences=sequences_list,
+            r_refs = self.reward_model_group.forward(
+                input_ids=sequences_list,
                 attention_mask=attention_mask_list,
                 pad_sequence=[True] * len(samples_list),
             )
-        else:
-            queries_list = sum(
-                [self.tokenizer.batch_decode(seq, skip_special_tokens=False) for seq in sequences_list], []
-            )
+        # else:
+        #     queries_list = sum(
+        #         [self.tokenizer.batch_decode(seq, skip_special_tokens=False) for seq in sequences_list], []
+        #     )
 
-            if self.custom_reward_func:
-                # Let Ray automatically distribute the workload across available resources
-                batch_size = self.strategy.args.micro_rollout_batch_size
-                num_chunks = (len(queries_list) + batch_size - 1) // batch_size
-                r_refs = []
-                for i in range(num_chunks):
-                    start_idx = i * batch_size
-                    end_idx = min((i + 1) * batch_size, len(queries_list))
-                    r = self.custom_reward_func.remote(
-                        queries_list[start_idx:end_idx],
-                        prompts_list[start_idx:end_idx],
-                        labels_list[start_idx:end_idx],
-                    )
-                    r_refs.append(r)
-            else:
-                # Distribute data across different remote reward function servers
-                num_servers = len(self.remote_rm_url)
-                batch_size = (len(queries_list) + num_servers - 1) // num_servers
-                r_refs = []
-                for i in range(num_servers):
-                    start_idx = i * batch_size
-                    end_idx = min((i + 1) * batch_size, len(queries_list))
-                    rm = self.remote_rm_url[i]
-                    r = remote_rm_fn_ray.remote(
-                        rm,
-                        queries=queries_list[start_idx:end_idx],
-                        prompts=prompts_list[start_idx:end_idx],
-                        labels=labels_list[start_idx:end_idx],
-                    )
-                    r_refs.append(r)
+        #     if self.custom_reward_func:
+        #         # Let Ray automatically distribute the workload across available resources
+        #         batch_size = self.strategy.args.micro_rollout_batch_size
+        #         num_chunks = (len(queries_list) + batch_size - 1) // batch_size
+        #         r_refs = []
+        #         for i in range(num_chunks):
+        #             start_idx = i * batch_size
+        #             end_idx = min((i + 1) * batch_size, len(queries_list))
+        #             r = self.custom_reward_func.remote(
+        #                 queries_list[start_idx:end_idx],
+        #                 prompts_list[start_idx:end_idx],
+        #                 labels_list[start_idx:end_idx],
+        #             )
+        #             r_refs.append(r)
+        #     else:
+        #         # Distribute data across different remote reward function servers
+        #         num_servers = len(self.remote_rm_url)
+        #         batch_size = (len(queries_list) + num_servers - 1) // num_servers
+        #         r_refs = []
+        #         for i in range(num_servers):
+        #             start_idx = i * batch_size
+        #             end_idx = min((i + 1) * batch_size, len(queries_list))
+        #             rm = self.remote_rm_url[i]
+        #             r = remote_rm_fn_ray.remote(
+        #                 rm,
+        #                 queries=queries_list[start_idx:end_idx],
+        #                 prompts=prompts_list[start_idx:end_idx],
+        #                 labels=labels_list[start_idx:end_idx],
+        #             )
+        #             r_refs.append(r)
 
-        # Sync to avoid GPU OOM when colocate models
-        if args.colocate_all_models and not self.remote_rm_url:
-            ray.get(r_refs)
-            ray.get(self.reward_model_group.async_run_method(method_name="empty_cache"))
+        # # Sync to avoid GPU OOM when colocate models
+        # if args.colocate_all_models and not self.remote_rm_url:
+        #     ray.get(r_refs)
+        #     ray.get(self.reward_model_group.async_run_method(method_name="empty_cache"))
 
         # Batch call actor model
-        action_log_probs_ref = self.actor_model_group.async_run_method_batch(
-            method_name="forward",
+        action_log_probs_ref = self.actor_model_group.forward(
             sequences=sequences_list,
             action_mask=action_mask_list,
             attention_mask=attention_mask_list,
         )
 
-        # Sync to avoid GPU OOM when colocate models
-        if args.colocate_all_models or args.colocate_actor_ref:
-            ray.get(action_log_probs_ref)
-            ray.get(self.actor_model_group.async_run_method(method_name="empty_cache"))
+        # # Sync to avoid GPU OOM when colocate models
+        # if args.colocate_all_models or args.colocate_actor_ref:
+        #     ray.get(action_log_probs_ref)
+        #     ray.get(self.actor_model_group.async_run_method(method_name="empty_cache"))
 
         # Batch call critic model
         if self.critic_model_group is not None:
-            if args.colocate_critic_reward and not self.remote_rm_url:
-                ray.get(r_refs)
-                ray.get(self.reward_model_group.async_run_method(method_name="empty_cache"))
+            # if args.colocate_critic_reward and not self.remote_rm_url:
+            #     ray.get(r_refs)
+            #     ray.get(self.reward_model_group.async_run_method(method_name="empty_cache"))
 
-            value_ref = self.critic_model_group.async_run_method_batch(
-                method_name="forward",
-                sequences=sequences_list,
+            value_ref = self.critic_model_group.forward(
+                input_ids=sequences_list,
                 action_mask=action_mask_list,
                 attention_mask=attention_mask_list,
             )
-            if args.colocate_all_models or args.colocate_critic_reward:
-                ray.get(value_ref)
-                ray.get(self.critic_model_group.async_run_method(method_name="empty_cache"))
-        else:
-            value_ref = ray.put([[None]] * (len(samples_list) * args.ring_attn_size * args.ds_tensor_parallel_size))
+            # if args.colocate_all_models or args.colocate_critic_reward:
+            #     ray.get(value_ref)
+            #     ray.get(self.critic_model_group.async_run_method(method_name="empty_cache"))
+        # else:
+        #     value_ref = ray.put([[None]] * (len(samples_list) * args.ring_attn_size * args.ds_tensor_parallel_size))
 
         # Batch call initial model
         if self.initial_model_group is not None:
-            base_action_log_probs_ref = self.initial_model_group.async_run_method_batch(
-                method_name="forward",
+            # Log the devices of the arguments
+            # print(f"Sequences device: {sequences_list.device}")
+            # print(f"Attention mask device: {attention_mask_list.device}")
+            # print(f"Action mask device: {action_mask_list.device}")
+            base_action_log_probs_ref = self.initial_model_group.forward(
                 sequences=sequences_list,
                 action_mask=action_mask_list,
                 attention_mask=attention_mask_list,
             )
 
-            if args.colocate_all_models or args.colocate_actor_ref:
-                ray.get(base_action_log_probs_ref)
-                ray.get(self.initial_model_group.async_run_method(method_name="empty_cache"))
-        else:
-            base_action_log_probs_ref = ray.put(
-                [[None]] * (len(samples_list) * args.ring_attn_size * args.ds_tensor_parallel_size)
-            )
+        #     if args.colocate_all_models or args.colocate_actor_ref:
+        #         ray.get(base_action_log_probs_ref)
+        #         ray.get(self.initial_model_group.async_run_method(method_name="empty_cache"))
+        # else:
+        #     base_action_log_probs_ref = ray.put(
+        #         [[None]] * (len(samples_list) * args.ring_attn_size * args.ds_tensor_parallel_size)
+        #     )
 
         # Wait for all remote calls to complete and flatten the results
         # Note: the results duplicated ring_attn_size * ds_tensor_parallel_size times
         duplicate_factor = args.ring_attn_size * args.ds_tensor_parallel_size
-        action_log_probs_list = sum(ray.get(action_log_probs_ref)[::duplicate_factor], [])
-        base_action_log_probs_list = sum(ray.get(base_action_log_probs_ref)[::duplicate_factor], [])
-        value_list = sum(ray.get(value_ref)[::duplicate_factor], [])
-        rewards_list = ray.get(r_refs)
+        # print(f"duplicate_factor: {duplicate_factor}")
+        
+        # * addition convert to list
+        # print(f"shape of action_log_probs_ref: {action_log_probs_ref.shape}")
+        # print(f"shape of base_action_log_probs_ref: {base_action_log_probs_ref.shape}")
+        # print(f"shape of value_ref: {value_ref.shape}")
+        # print(f"shape of r_refs: {r_refs.shape}")
+        
+        action_log_probs_ref = action_log_probs_ref.tolist()
+        base_action_log_probs_ref = base_action_log_probs_ref.tolist()
+        value_ref = value_ref.tolist()
+        r_refs = r_refs.tolist()
+        
+        # print(f"shape of action_log_probs_ref: {len(action_log_probs_ref)}")
+        # print(f"shape of base_action_log_probs_ref: {len(base_action_log_probs_ref)}")
+        # print(f"shape of value_ref: {len(value_ref)}")
+        # print(f"shape of r_refs: {len(r_refs)}")
+
+        
+        
+        action_log_probs_list = [sum([action_log_probs_ref[::duplicate_factor]], [])]
+        base_action_log_probs_list = [sum([base_action_log_probs_ref[::duplicate_factor]], [])]
+        value_list = [sum([value_ref[::duplicate_factor]], [])]
+        rewards_list = r_refs
+        # print(f"refs: {r_refs}")
         if self.remote_rm_url is None:
-            rewards_list = sum(rewards_list[::duplicate_factor], [])
+            rewards_list = [sum([rewards_list[::duplicate_factor]], [])]
+            # print(f"rewards_list: {rewards_list}")
         else:
             rewards_list = torch.cat(rewards_list, dim=0).chunk(len(samples_list))
 
@@ -389,6 +418,13 @@ class RemoteExperienceMaker(ABC):
             == len(rewards_list)
         ), f"len(samples_list): {len(samples_list)}, len(action_log_probs_list): {len(action_log_probs_list)}, len(base_action_log_probs_list): {len(base_action_log_probs_list)}, len(value_list): {len(value_list)}, len(rewards_list): {len(rewards_list)}"
 
+
+        # Convert lists to tensors and move to CUDA
+        action_log_probs_list = torch.tensor(action_log_probs_list, device="cuda")
+        base_action_log_probs_list = torch.tensor(base_action_log_probs_list, device="cuda")
+        value_list = torch.tensor(value_list, device="cuda")
+        rewards_list = torch.tensor(rewards_list, device="cuda")
+
         # Process results for each sample
         for i, (samples, action_log_probs, base_action_log_probs, value, rewards) in enumerate(
             zip(samples_list, action_log_probs_list, base_action_log_probs_list, value_list, rewards_list)
@@ -397,7 +433,7 @@ class RemoteExperienceMaker(ABC):
                 kl = compute_approx_kl(
                     action_log_probs,
                     base_action_log_probs,
-                    kl_estimator=self.strategy.args.kl_estimator,
+                    kl_estimator=self.args.kl_estimator,
                 )
             else:
                 kl = torch.zeros_like(action_log_probs, dtype=action_log_probs.dtype, device=device)
@@ -448,7 +484,7 @@ class RemoteExperienceMaker(ABC):
         - experiences: List of Experience
         - rewards: List of rewards
         """
-        args = self.strategy.args
+        args = self.args
 
         # get rewards from experiences
         rewards = [experience.info["reward"] for experience in experiences]
@@ -637,7 +673,132 @@ class RemoteExperienceMaker(ABC):
 
     @torch.no_grad()
     def _generate_with_hf(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
-        raise NotImplementedError("HF generation is not implemented yet")
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        args = self.args
+
+        # Load the Hugging Face model and tokenizer
+        model = self.actor_model_group.to("cuda")
+        # model = AutoModelForCausalLM.from_pretrained(self.args.pretrain).to("cuda")
+        tokenizer = AutoTokenizer.from_pretrained(self.args.pretrain)
+
+        sampling_params = {
+            "temperature": generate_kwargs.get("temperature", 1.0),
+            "top_p": generate_kwargs.get("top_p", 1.0),
+            "top_k": generate_kwargs.get("top_k", 1),
+            "max_length": generate_kwargs.get("max_new_tokens", 1024),
+            "min_length": generate_kwargs.get("min_new_tokens", 1),
+            "do_sample": True,
+            "eos_token_id": tokenizer.eos_token_id,
+            "pad_token_id": tokenizer.pad_token_id,
+        }
+
+        # Expand prompt list based on the number of samples per prompt
+        n_samples_per_prompt = generate_kwargs.pop("n_samples_per_prompt", args.n_samples_per_prompt)
+        all_prompts = sum([[prompt] * n_samples_per_prompt for prompt in all_prompts], [])
+        all_labels = sum([[label] * n_samples_per_prompt for label in all_labels], [])
+        
+        # print(all_prompts[0])
+        # print("="*20)
+        # print(all_labels[0])
+        # print("="*20)
+        # print(all_prompts[1])
+        # print("="*20)
+        # print(all_labels[1])
+        
+
+        # Tokenize prompts
+        # print("Max length of prompt:", self.prompt_max_len)
+        pad_token_id, eos_token_id = tokenizer.pad_token_id, tokenizer.eos_token_id
+        all_prompt_token_ids = self.tokenize_fn(all_prompts, self.prompt_max_len, padding=False)["input_ids"]
+        
+        # print(all_prompt_token_ids[0])
+        # print("="*20)
+        # print(all_prompt_token_ids[1])
+
+        # Generate responses
+        outputs = []
+        for token_ids in all_prompt_token_ids:
+            token_ids = torch.tensor(token_ids, dtype=int, device="cuda").unsqueeze(0)  # Add batch dimension
+            # print(token_ids.shape)
+            outputs.append(
+                model.generate(
+                    input_ids=token_ids,
+                    **sampling_params,
+                )
+            )
+            print(f"Generated {outputs[-1]}")
+            # print(outputs[-1])
+            
+        # outputs = model.generate(
+        #     input_ids=all_prompt_token_ids,
+        #     **sampling_params,
+        # )
+
+
+        # Group outputs by micro_rollout_batch_size
+        samples_list = []
+        for i in range(0, len(outputs), args.micro_rollout_batch_size):
+            batch_outputs = outputs[i : i + args.micro_rollout_batch_size]
+            batch_prompts = all_prompts[i : i + args.micro_rollout_batch_size]
+            batch_labels = all_labels[i : i + args.micro_rollout_batch_size]
+
+            # Calculate max lengths for this batch only
+            batch_max_input_len = max(len(token_ids) for token_ids in all_prompt_token_ids)
+            batch_max_output_len = max(len(output) for output in batch_outputs)
+
+            _sequences = []
+            for j, output in enumerate(batch_outputs):
+                # left padding input
+                input_len = len(all_prompt_token_ids[j])
+                input_ids = [pad_token_id] * (batch_max_input_len - input_len) + list(all_prompt_token_ids[j])
+
+                # right padding output
+                output_len = output[0].size(1)
+                output_ids = output[0].squeeze(0).tolist() + [pad_token_id] * (batch_max_output_len - output_len)
+                
+                
+                print(">"*20)
+                # # print(all_prompt_token_ids[j])
+                # print(len(all_prompt_token_ids[j]))
+                print(len(input_ids))
+                # print("="*20)
+                # print(output_len)
+                # # print(output_ids)
+                print(len(output_ids))
+
+                # concat input and output
+                _sequences.append(input_ids + output_ids)
+
+            print("="*20)
+            # print(_sequences)
+            # print(sequences)
+            # print(len(_sequences[0]))
+            
+            sequences = torch.tensor(_sequences)
+            sequences, attention_mask, action_mask = process_sequences(
+                sequences, batch_max_input_len, eos_token_id, pad_token_id
+            )
+            sequences = sequences.to("cuda")
+            attention_mask = attention_mask.to("cuda")
+            action_mask = action_mask.to("cuda")
+            response_length = action_mask.float().sum(dim=-1)
+            total_length = attention_mask.float().sum(dim=-1)
+
+            rollout_samples = Samples(
+                sequences=sequences,
+                attention_mask=attention_mask,
+                action_mask=action_mask,
+                response_length=response_length,
+                total_length=total_length,
+                prompts=batch_prompts,
+                labels=batch_labels,
+            )
+            samples_list.append(rollout_samples)
+
+        return samples_list
+
+
 
     def _generate_vllm(self, all_prompts: List[str], all_labels, **kwargs) -> List[Samples]:
         from vllm import SamplingParams

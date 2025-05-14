@@ -137,33 +137,34 @@ class PPOTrainer(ABC):
             args.save_steps = float("inf")  # do not save ckpt
 
         # broadcast init checkpoint to vllm
-        ckpt_path = os.path.join(args.ckpt_path, "_actor")
-        if args.load_checkpoint and os.path.exists(ckpt_path) and not self.vllm_engines is None:
-            # vLLM wakeup when vllm_enable_sleep
-            if self.strategy.args.vllm_enable_sleep:
-                from trainer.ray.vllm_engine import batch_vllm_engine_call
+        # ckpt_path = os.path.join(args.ckpt_path, "_actor")
+        # if args.load_checkpoint and os.path.exists(ckpt_path) and not self.vllm_engines is None:
+        #     # vLLM wakeup when vllm_enable_sleep
+        #     if self.strategy.args.vllm_enable_sleep:
+        #         from trainer.ray.vllm_engine import batch_vllm_engine_call
 
-                batch_vllm_engine_call(self.vllm_engines, "wake_up")
+        #         batch_vllm_engine_call(self.vllm_engines, "wake_up")
 
-            ref = self.actor_model_group.async_run_method(method_name="broadcast_to_vllm")
-            ray.get(ref)
+        #     ref = self.actor_model_group.async_run_method(method_name="broadcast_to_vllm")
+        #     ray.get(ref)
 
-            # vLLM offload when vllm_enable_sleep
-            if self.strategy.args.vllm_enable_sleep:
-                batch_vllm_engine_call(self.vllm_engines, "sleep")
+        #     # vLLM offload when vllm_enable_sleep
+        #     if self.strategy.args.vllm_enable_sleep:
+        #         batch_vllm_engine_call(self.vllm_engines, "sleep")
 
         # Restore step and start_epoch
-        consumed_samples = ray.get(self.actor_model_group.async_run_method(method_name="get_consumed_samples"))[0]
+        consumed_samples = 0 # self.actor_model_group.get_consumed_samples()
         steps = consumed_samples // args.rollout_batch_size + 1
         start_episode = consumed_samples // args.rollout_batch_size // num_rollouts_per_episodes
         consumed_samples = consumed_samples % (num_rollouts_per_episodes * args.rollout_batch_size)
 
         for episode in range(start_episode, args.num_episodes):
-            self.prompts_dataloader.sampler.set_epoch(
-                episode, consumed_samples=0 if episode > start_episode else consumed_samples
-            )
+            # Set epoch for the dataloader
+            # self.prompts_dataloader.dataset.set_epoch(
+            # episode, consumed_samples=0 if episode > start_episode else consumed_samples
+            # )
             pbar = tqdm(
-                range(self.prompts_dataloader.__len__()),
+                range(len(self.prompts_dataloader)),
                 desc=f"Episode [{episode + 1}/{args.num_episodes}]",
                 disable=False,
             )
@@ -173,13 +174,21 @@ class PPOTrainer(ABC):
                 sample0 = self.tokenizer.batch_decode(
                     experiences[0].sequences[0].unsqueeze(0), skip_special_tokens=True
                 )
+                print("Priting sample0 :")
                 print(sample0)
-                refs = self.actor_model_group.async_run_method_batch(method_name="append", experience=experiences)
-                if self.critic_model_group is not None:
-                    refs.extend(
-                        self.critic_model_group.async_run_method_batch(method_name="append", experience=experiences)
-                    )
-                ray.get(refs)
+                
+                # Log the type and length of experiences for debugging
+                print(f"Type of experiences: {type(experiences)}")
+                
+                for experience in experiences:
+                    # refs = self.actor_model_group.async_run_method_batch(method_name="append", experience=experiences)
+                    refs = self.actor_model_group.append(experience)
+                    if self.critic_model_group is not None:
+                        # refs.extend(
+                        #     self.critic_model_group.async_run_method_batch(method_name="append", experience=experiences)
+                        # )
+                        self.critic_model_group.append(experience)
+                    # ray.get(refs)
 
                 # @note : Real training of critic and actor in this function.
                 status = self.ppo_train(steps)
@@ -211,44 +220,46 @@ class PPOTrainer(ABC):
         # triger remote critic model training
         if self.critic_model_group is not None:
             # sync for deepspeed_enable_sleep
-            if self.strategy.args.deepspeed_enable_sleep:
-                ray.get(self.critic_model_group.async_run_method(method_name="reload_states"))
+            # if self.strategy.args.deepspeed_enable_sleep:
+            #     ray.get(self.critic_model_group.async_run_method(method_name="reload_states"))
 
             # ! Training of critic model
-            critic_status_ref = self.critic_model_group.async_run_method(method_name="fit")
+            # critic_status_ref = self.critic_model_group.async_run_method(method_name="fit")
+            self.critic_model_group.fit()
 
-            if self.strategy.args.colocate_all_models or self.strategy.args.deepspeed_enable_sleep:
-                status.update(ray.get(critic_status_ref)[0])
-            if self.strategy.args.deepspeed_enable_sleep:
-                ray.get(self.critic_model_group.async_run_method(method_name="offload_states"))
+            # if self.strategy.args.colocate_all_models or self.strategy.args.deepspeed_enable_sleep:
+            #     status.update(ray.get(critic_status_ref)[0])
+            # if self.strategy.args.deepspeed_enable_sleep:
+            #     ray.get(self.critic_model_group.async_run_method(method_name="offload_states"))
 
         # actor model training
         if global_steps > self.freezing_actor_steps:
-            if self.strategy.args.deepspeed_enable_sleep:
-                self.actor_model_group.async_run_method(method_name="reload_states")
+            # if self.strategy.args.deepspeed_enable_sleep:
+            #     self.actor_model_group.async_run_method(method_name="reload_states")
 
             # ! Training of actor model
-            actor_status_ref = self.actor_model_group.async_run_method(method_name="fit", kl_ctl=self.kl_ctl.value)
-            status.update(ray.get(actor_status_ref)[0])
+            # actor_status_ref = self.actor_model_group.async_run_method(method_name="fit", kl_ctl=self.kl_ctl.value)
+            self.actor_model_group.fit(kl_ctl=self.kl_ctl.value)
+            # status.update(ray.get(actor_status_ref)[0])
 
-            if self.strategy.args.deepspeed_enable_sleep:
-                self.actor_model_group.async_run_method(method_name="offload_states")
+            # if self.strategy.args.deepspeed_enable_sleep:
+            #     self.actor_model_group.async_run_method(method_name="offload_states")
 
             # 4. broadcast weights to vllm engines
-            if self.vllm_engines is not None:
-                if self.strategy.args.vllm_enable_sleep:
-                    from trainer.ray.vllm_engine import batch_vllm_engine_call
+            # if self.vllm_engines is not None:
+            #     if self.strategy.args.vllm_enable_sleep:
+            #         from trainer.ray.vllm_engine import batch_vllm_engine_call
 
-                    batch_vllm_engine_call(self.vllm_engines, "wake_up")
+            #         batch_vllm_engine_call(self.vllm_engines, "wake_up")
 
-                ray.get(self.actor_model_group.async_run_method(method_name="broadcast_to_vllm"))
+            #     ray.get(self.actor_model_group.async_run_method(method_name="broadcast_to_vllm"))
 
-                if self.strategy.args.vllm_enable_sleep:
-                    batch_vllm_engine_call(self.vllm_engines, "sleep")
+            #     if self.strategy.args.vllm_enable_sleep:
+            #         batch_vllm_engine_call(self.vllm_engines, "sleep")
 
         # 5. wait remote critic model training done
-        if self.critic_model_group and not self.strategy.args.colocate_all_models:
-            status.update(ray.get(critic_status_ref)[0])
+        # if self.critic_model_group and not self.strategy.args.colocate_all_models:
+        #     status.update(ray.get(critic_status_ref)[0])
 
         return status
 

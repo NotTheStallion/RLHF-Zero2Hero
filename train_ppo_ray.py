@@ -76,7 +76,9 @@ def train(args):
     #     duplicate_actors=args.ring_attn_size * args.ds_tensor_parallel_size,
     # )
     actor_model = Actor(
-        pretrain_or_model=args.pretrain
+        pretrain_or_model=args.pretrain,
+        device_map="auto",
+        args=args
     )
     
     print(f"actor_model: {actor_model}")
@@ -95,7 +97,9 @@ def train(args):
     #     )
     
     ref_model = Actor(
-        pretrain_or_model=args.pretrain
+        pretrain_or_model=args.pretrain,
+        device_map="auto",
+        args=args
     )
     
     print(f"ref_model: {ref_model}")
@@ -140,28 +144,10 @@ def train(args):
     # else:
     #     reward_model = None
     
-    critic_model = get_llm_for_sequence_regression(
-        args.pretrain,
-        "critic",
-        use_flash_attention_2=args.flash_attn,
-        bf16=args.bf16,
-        load_in_4bit=args.load_in_4bit,
-        lora_rank=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        target_modules=args.target_modules,
-        lora_dropout=args.lora_dropout,
-        init_value_head=True,
-        value_head_prefix=args.value_head_prefix,
-        packing_samples=args.packing_samples,
-        device_map="auto"
-    )
-    
-    print(f"critic_model: {critic_model}")
-    
     reward_model = get_llm_for_sequence_regression(
         args.pretrain,
         "reward",
-        use_flash_attention_2=args.flash_attn,
+        # use_flash_attention_2=args.flash_attn,
         bf16=args.bf16,
         load_in_4bit=args.load_in_4bit,
         lora_rank=args.lora_rank,
@@ -175,6 +161,25 @@ def train(args):
     )
 
     print(f"reward_model: {reward_model}")
+    
+    critic_model = get_llm_for_sequence_regression(
+        args.pretrain,
+        "critic",
+        # use_flash_attention_2=args.flash_attn,
+        bf16=args.bf16,
+        load_in_4bit=args.load_in_4bit,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        target_modules=args.target_modules,
+        lora_dropout=args.lora_dropout,
+        init_value_head=True,
+        value_head_prefix=args.value_head_prefix,
+        packing_samples=args.packing_samples,
+        device_map="auto",
+        args=args,
+    )
+    
+    print(f"critic_model: {critic_model}")
 
     # # init PPO trainer (Single controller)
     ppo_trainer = PPOTrainer(
