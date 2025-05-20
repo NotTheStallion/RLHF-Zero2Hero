@@ -10,15 +10,24 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer import get_scheduler
 
-from openrlhf.models import ValueLoss, get_llm_for_sequence_regression
-from openrlhf.models.utils import masked_mean
-from openrlhf.trainer.ppo_utils.experience_maker import Experience
-from openrlhf.utils import get_tokenizer
-from openrlhf.utils.deepspeed import DeepspeedStrategy
-from openrlhf.utils.deepspeed.deepspeed_utils import offload_deepspeed_states, reload_deepspeed_states
+from models.loss import ValueLoss
+from models.model import get_llm_for_sequence_regression
+from models.utils import masked_mean
+from trainer.ppo_utils.experience_maker import Experience
+from utils.utils import get_tokenizer
 
-from ..ppo_utils import NaiveReplayBuffer
+
+from ..ppo_utils.replay_buffer import NaiveReplayBuffer
 from .launcher import BasePPORole
+
+
+
+
+from torch import nn
+import torch.optim as optim
+from models.actor import Actor
+
+
 
 
 class CriticPPOTrainer(ABC):
@@ -35,8 +44,8 @@ class CriticPPOTrainer(ABC):
         dataloader_pin_memory: bool = True,
         **kwargs,
     ):
-        self.strategy = strategy
-        self.args = strategy.args
+        self.strategy = None
+        self.args = strategy
         self.critic = critic
         self.critic_optim = critic_optim
         self.critic_scheduler = critic_scheduler
@@ -61,7 +70,7 @@ class CriticPPOTrainer(ABC):
         dataloader = DataLoader(
             self.replay_buffer,
             batch_size=self.replay_buffer.sample_batch_size,
-            shuffle=False if self.strategy.ring_attn_group is not None else True,
+            shuffle=True,
             drop_last=True,
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
@@ -74,17 +83,19 @@ class CriticPPOTrainer(ABC):
             pbar = tqdm(
                 dataloader,
                 desc=f"Train epoch [{epoch + 1}/{self.max_epochs}]",
-                disable=not self.strategy.is_rank_0(),
             )
             for experience in pbar:
                 experience.to_device(device)
                 status = self.training_step(experience)
+                experience.to_device("cpu")
 
                 # for DP
-                status = self.strategy.all_reduce(status)
+                # status = self.strategy.all_reduce(status)
 
                 status_list.append(status)
                 pbar.set_postfix(status)
+            
+            import pdb; pdb.set_trace()
 
         if status_list:
             status_mean = status_list[0]
@@ -111,7 +122,7 @@ class CriticPPOTrainer(ABC):
             action_mask=action_mask,
             attention_mask=attention_mask,
             return_output=True,
-            ring_attn_group=self.strategy.ring_attn_group,
+            ring_attn_group=None,
             values_allgather=True,
             packed_seq_lens=packed_seq_lens,
         )
@@ -129,8 +140,13 @@ class CriticPPOTrainer(ABC):
         else:
             aux_loss = 0
         loss = critic_loss + aux_loss * self.args.aux_loss_coef
-        self.strategy.backward(loss, self.critic, self.critic_optim)
-        self.strategy.optimizer_step(self.critic_optim, self.critic, self.critic_scheduler, name="critic")
+        # print(f"type model: {type(self.critic)}")
+        # print(self.critic)
+        # import pdb; pdb.set_trace()
+        # print(f"type model 1: {type(self.critic.model)}")
+        # print(f"type model 2: {type(self.critic.model.model)}")
+        self.backward(loss, self.critic, self.critic_optim)
+        self.optimizer_step(self.critic_optim, self.critic, self.critic_scheduler, name="critic")
 
         # status
         status = {
@@ -139,78 +155,97 @@ class CriticPPOTrainer(ABC):
             "critic_lr": self.critic_scheduler.get_last_lr()[0],
         }
         return status
+    
+    def backward(self, loss: torch.Tensor, model: nn.Module, optimizer: optim.Optimizer, **kwargs) -> None:
+        if isinstance(model, Actor):
+            model = model.model
+        # model.backward(loss)
+        loss.backward()
+
+    def optimizer_step(
+        self,
+        optimizer: optim.Optimizer,
+        model: nn.Module,
+        scheduler,
+        name="model",
+        **kwargs,
+    ) -> None:
+        if isinstance(model, Actor):
+            model = model.model
+        # model.step()
+        optimizer.step()
 
 
-@ray.remote(num_gpus=1)
-class CriticModelRayActor(BasePPORole):
-    def init_model_from_pretrained(self, strategy: DeepspeedStrategy, pretrain, max_steps):
-        args = strategy.args
+class CriticModelRayActor():
+    def __init__(self, strategy_args, pretrain, max_steps):
+        args = strategy_args
 
-        self._setup_distributed(strategy)
-        critic = get_llm_for_sequence_regression(
+        # self._setup_distributed(strategy)
+        self.critic = get_llm_for_sequence_regression(
             pretrain,
             "critic",
-            normalize_reward=strategy.args.normalize_reward,
-            use_flash_attention_2=strategy.args.flash_attn,
-            bf16=strategy.args.bf16,
-            load_in_4bit=strategy.args.load_in_4bit,
-            lora_rank=strategy.args.lora_rank,
-            lora_alpha=strategy.args.lora_alpha,
-            target_modules=strategy.args.target_modules,
-            lora_dropout=strategy.args.lora_dropout,
-            ds_config=strategy.get_ds_train_config(is_actor=False),
-            value_head_prefix=strategy.args.value_head_prefix,
-            init_value_head=strategy.args.pretrain == strategy.args.critic_pretrain,
-            packing_samples=strategy.args.packing_samples,
+            normalize_reward=args.normalize_reward,
+            use_flash_attention_2=args.flash_attn,
+            bf16=args.bf16,
+            load_in_4bit=args.load_in_4bit,
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            target_modules=args.target_modules,
+            lora_dropout=args.lora_dropout,
+            ds_config=None,
+            value_head_prefix=args.value_head_prefix,
+            init_value_head=args.pretrain == args.critic_pretrain,
+            packing_samples=args.packing_samples,
+            device_map="auto",
         )
-        strategy.print(critic)
-        strategy.print("reward normalization status: {}".format(strategy.args.normalize_reward))
-        strategy.print("mean: {}, std {}".format(critic.mean, critic.std))
+        print(self.critic)
+        print("reward normalization status: {}".format(args.normalize_reward))
+        print("mean: {}, std {}".format(self.critic.mean, self.critic.std))
 
         # configure tokenizer
-        if strategy.args.save_value_network:
+        if args.save_value_network:
             self.tokenizer = get_tokenizer(
-                pretrain, critic, "left", strategy, use_fast=not strategy.args.disable_fast_tokenizer
+                pretrain, self.critic, "left", None, use_fast=not args.disable_fast_tokenizer
             )
 
         # configure optimizer
-        critic_optim = strategy.create_optimizer(
-            critic, lr=args.critic_learning_rate, betas=args.adam_betas, weight_decay=args.l2
+        self.critic_optim = torch.optim.AdamW(
+            self.critic.parameters(), lr=args.critic_learning_rate, betas=args.adam_betas, weight_decay=args.l2
         )
 
         # configure scheduler
-        critic_scheduler = get_scheduler(
+        self.critic_scheduler = get_scheduler(
             "cosine_with_min_lr",
-            critic_optim,
+            self.critic_optim,
             num_warmup_steps=math.ceil(max_steps * args.lr_warmup_ratio),
             num_training_steps=max_steps,
             scheduler_specific_kwargs={"min_lr": args.critic_learning_rate * 0.1},
         )
 
-        if args.gradient_checkpointing:
-            critic.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
-            )
+        # if args.gradient_checkpointing:
+        #     critic.gradient_checkpointing_enable(
+        #         gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
+        #     )
 
         # prepare models/optimizers...
-        self.critic, self.critic_optim, self.critic_scheduler = strategy.prepare(
-            (critic, critic_optim, critic_scheduler),
-            is_rlhf=True,
-        )
+        # self.critic, self.critic_optim, self.critic_scheduler = strategy.prepare(
+        #     (critic, critic_optim, critic_scheduler),
+        #     is_rlhf=True,
+        # )
 
         # load checkpoint
-        if args.load_checkpoint and os.path.exists(os.path.join(args.ckpt_path, "_actor")):
-            ckpt_path = os.path.join(args.ckpt_path, "_critic")
-            strategy.print(f"Loading the checkpoint: {ckpt_path}")
-            strategy.load_ckpt(self.critic, ckpt_path)
+        # if args.load_checkpoint and os.path.exists(os.path.join(args.ckpt_path, "_actor")):
+        #     ckpt_path = os.path.join(args.ckpt_path, "_critic")
+        #     strategy.print(f"Loading the checkpoint: {ckpt_path}")
+        #     strategy.load_ckpt(self.critic, ckpt_path)
 
         # initial offload
-        if strategy.args.deepspeed_enable_sleep:
-            self.offload_states()
+        # if strategy.args.deepspeed_enable_sleep:
+        #     self.offload_states()
 
         # configure Trainer
         self.trainer = CriticPPOTrainer(
-            strategy,
+            args,
             critic=self.critic,
             critic_optim=self.critic_optim,
             critic_scheduler=self.critic_scheduler,
@@ -227,13 +262,16 @@ class CriticModelRayActor(BasePPORole):
     ) -> torch.Tensor:
         """Generates critic values."""
         device = torch.cuda.current_device()
+        # print("Put all tensors to device :", device)
+        # print(f"seq device: {sequences.device}")
+        # print(f"seq after device: {sequences.to(device).device}")
         self.critic.eval()
         with torch.no_grad():
             value = self.critic(
                 sequences.to(device),
                 action_mask.to(device),
                 attention_mask.to(device),
-                ring_attn_group=self.strategy.ring_attn_group,
+                ring_attn_group=False,
                 values_allgather=True,
             )
         self.critic.train()  # reset model state
@@ -253,8 +291,8 @@ class CriticModelRayActor(BasePPORole):
         torch.cuda.synchronize()
         return status
 
-    def save_model(self):
-        args = self.strategy.args
+    def _save_model(self):
+        args = self.args
 
         # save model checkpoint after fitting on only rank0
         self.strategy.save_model(
@@ -263,14 +301,14 @@ class CriticModelRayActor(BasePPORole):
             args.save_path + "_critic",
         )
 
-    def save_checkpoint(self, tag):
+    def _save_checkpoint(self, tag):
         args = self.strategy.args
         self.strategy.save_ckpt(
             self.critic, os.path.join(args.ckpt_path, "_critic"), tag, args.max_ckpt_num, args.max_ckpt_mem
         )
 
-    def reload_states(self):
-        reload_deepspeed_states(self.critic)
+    # def reload_states(self):
+    #     reload_deepspeed_states(self.critic)
 
-    def offload_states(self):
-        offload_deepspeed_states(self.critic)
+    # def offload_states(self):
+    #     offload_deepspeed_states(self.critic)

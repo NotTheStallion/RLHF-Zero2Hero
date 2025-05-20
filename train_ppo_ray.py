@@ -18,6 +18,11 @@ from trainer.ppo_trainer import PPOTrainer
 from models.actor import Actor
 from models.model import get_llm_for_sequence_regression
 
+from trainer.ray.ppo_critic import CriticModelRayActor
+from trainer.ray.ppo_actor import ActorModelRayActor
+from trainer.ray.launcher import RewardModelRayActor
+from trainer.ray.launcher import ReferenceModelRayActor
+
 
 def train(args):
     # configure strategy
@@ -75,11 +80,20 @@ def train(args):
     #     num_gpus_per_actor=0.2 if pg else 1,
     #     duplicate_actors=args.ring_attn_size * args.ds_tensor_parallel_size,
     # )
-    actor_model = Actor(
-        pretrain_or_model=args.pretrain,
-        device_map="auto",
-        args=args
+    
+    actor_model = ActorModelRayActor(
+        args,
+        args.pretrain,
+        max_steps=2,
+        vllm_engines=None
     )
+    
+    
+    # actor_model = Actor(
+    #     pretrain_or_model=args.pretrain,
+    #     device_map="auto",
+    #     args=args
+    # )
     
     print(f"actor_model: {actor_model}")
     
@@ -96,11 +110,17 @@ def train(args):
     #         duplicate_actors=args.ring_attn_size * args.ds_tensor_parallel_size,
     #     )
     
-    ref_model = Actor(
-        pretrain_or_model=args.pretrain,
-        device_map="auto",
-        args=args
+    ref_model = ReferenceModelRayActor(
+        args,
+        args.pretrain
     )
+    
+    
+    # ref_model = Actor(
+    #     pretrain_or_model=args.pretrain,
+    #     device_map="auto",
+    #     args=args
+    # )
     
     print(f"ref_model: {ref_model}")
 
@@ -130,6 +150,18 @@ def train(args):
     # else:
     #     critic_model = None
 
+    critic_init = CriticModelRayActor(
+        args,
+        args.critic_pretrain,
+        max_steps=2,
+    )
+    
+    critic_model = critic_init
+    
+    print("="*20)
+    print(f"critic_model: {critic_model}")
+    # import pdb; pdb.set_trace()
+
     # # multiple reward models
     # if not args.remote_rm_url:
     #     reward_pretrain = args.reward_pretrain
@@ -144,42 +176,32 @@ def train(args):
     # else:
     #     reward_model = None
     
-    reward_model = get_llm_for_sequence_regression(
-        args.pretrain,
-        "reward",
-        # use_flash_attention_2=args.flash_attn,
-        bf16=args.bf16,
-        load_in_4bit=args.load_in_4bit,
-        lora_rank=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        target_modules=args.target_modules,
-        lora_dropout=args.lora_dropout,
-        init_value_head=True,
-        value_head_prefix=args.value_head_prefix,
-        packing_samples=args.packing_samples,
-        device_map="auto"
+    reward_model = RewardModelRayActor(
+        args,
+        args.reward_pretrain,
     )
+    
+    # reward_model = get_llm_for_sequence_regression(
+    #     args.pretrain,
+    #     "reward",
+    #     # use_flash_attention_2=args.flash_attn,
+    #     bf16=args.bf16,
+    #     load_in_4bit=args.load_in_4bit,
+    #     lora_rank=args.lora_rank,
+    #     lora_alpha=args.lora_alpha,
+    #     target_modules=args.target_modules,
+    #     lora_dropout=args.lora_dropout,
+    #     init_value_head=True,
+    #     value_head_prefix=args.value_head_prefix,
+    #     packing_samples=args.packing_samples,
+    #     device_map="auto"
+    # )
 
     print(f"reward_model: {reward_model}")
     
-    critic_model = get_llm_for_sequence_regression(
-        args.pretrain,
-        "critic",
-        # use_flash_attention_2=args.flash_attn,
-        bf16=args.bf16,
-        load_in_4bit=args.load_in_4bit,
-        lora_rank=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        target_modules=args.target_modules,
-        lora_dropout=args.lora_dropout,
-        init_value_head=True,
-        value_head_prefix=args.value_head_prefix,
-        packing_samples=args.packing_samples,
-        device_map="auto",
-        args=args,
-    )
+    import pdb; pdb.set_trace() # after init models
     
-    print(f"critic_model: {critic_model}")
+    # print(f"critic_model: {critic_model}")
 
     # # init PPO trainer (Single controller)
     ppo_trainer = PPOTrainer(
@@ -203,6 +225,7 @@ def train(args):
     
     print(f"ppo_trainer set ... OK")
     
+    import pdb; pdb.set_trace() # after init ppo_trainer
     # # training update steps
     # max_steps = ray.get(ppo_trainer.get_max_steps.remote())
     max_steps = ppo_trainer.get_max_steps()

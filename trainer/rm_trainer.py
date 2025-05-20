@@ -124,7 +124,8 @@ class RewardModelTrainer(ABC):
                 range(len(self.train_dataloader)),
                 desc=f"Train step of epoch {epoch}",
             )
-
+            loss_sum = 0
+            acc_sum = 0
             self.model.train()
             for data in self.train_dataloader:
                 self.optimizer.zero_grad()
@@ -189,7 +190,7 @@ class RewardModelTrainer(ABC):
                 #     acc_sum = 0
                 #     global_step = step // accumulated_gradient
                 #     client_states = {"consumed_samples": global_step * args.train_batch_size}
-                #     self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+                # self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
                     
                 if self._wandb is not None:
                     self._wandb.log({"loss": logs_dict["loss"]})
@@ -197,12 +198,15 @@ class RewardModelTrainer(ABC):
                     self._wandb.log({"chosen_reward": logs_dict["chosen_reward"]})
                     self._wandb.log({"reject_reward": logs_dict["reject_reward"]})
                     self._wandb.log({"lr": logs_dict["lr"]})
+                # print(logs_dict["loss"])
 
                 step += 1
             epoch_bar.update()
             if self._wandb is not None:
                 self._wandb.log({"loss_mean": loss_sum / len(self.train_dataloader)})
                 self._wandb.log({"acc_mean": acc_sum / len(self.train_dataloader)})
+                self.evaluate(self.eval_dataloader, epoch)
+            # print(f"loss_sum: {loss_sum}, len(self.train_dataloader): {len(self.train_dataloader)}")
             
 
         if self._wandb is not None:
@@ -214,13 +218,13 @@ class RewardModelTrainer(ABC):
     def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}, client_states={}):
         if global_step % args.logging_steps == 0:
             # wandb
-            if self._wandb is not None and self.strategy.is_rank_0():
+            if self._wandb is not None:
                 logs = {"train/%s" % k: v for k, v in {**logs_dict, "global_step": global_step}.items()}
                 self._wandb.log(logs)
             # TensorBoard
-            elif self._tensorboard is not None and self.strategy.is_rank_0():
-                for k, v in logs_dict.items():
-                    self._tensorboard.add_scalar(f"train/{k}", v, global_step)
+            # elif self._tensorboard is not None and self.strategy.is_rank_0():
+            #     for k, v in logs_dict.items():
+            #         self._tensorboard.add_scalar(f"train/{k}", v, global_step)
 
         # eval
         if (
@@ -232,21 +236,20 @@ class RewardModelTrainer(ABC):
 
         # save ckpt
         # TODO: save best model on dev, use loss/perplexity on whole dev dataset as metric
-        if global_step % args.save_steps == 0:
-            tag = f"global_step{global_step}"
-            if not self.disable_ds_ckpt:
-                self.strategy.save_ckpt(
-                    self.model, args.ckpt_path, tag, args.max_ckpt_num, args.max_ckpt_mem, client_states
-                )
-            if self.save_hf_ckpt:
-                save_path = os.path.join(args.ckpt_path, f"{tag}_hf")
-                self.strategy.save_model(self.model, self.tokenizer, save_path)
+        # if global_step % args.save_steps == 0:
+        #     tag = f"global_step{global_step}"
+        #     if not self.disable_ds_ckpt:
+        #         self.strategy.save_ckpt(
+        #             self.model, args.ckpt_path, tag, args.max_ckpt_num, args.max_ckpt_mem, client_states
+        #         )
+        #     if self.save_hf_ckpt:
+        #         save_path = os.path.join(args.ckpt_path, f"{tag}_hf")
+        #         self.strategy.save_model(self.model, self.tokenizer, save_path)
 
     def evaluate(self, eval_dataloader, steps=0):
         step_bar = tqdm(
             range(eval_dataloader.__len__()),
             desc="Eval stage of steps %d" % steps,
-            disable=not self.strategy.is_rank_0(),
         )
         self.model.eval()
         with torch.no_grad():
@@ -272,23 +275,28 @@ class RewardModelTrainer(ABC):
                 loss = self.loss_fn(chosen_reward, reject_reward, margin)
 
                 rewards += [chosen_reward.flatten(), reject_reward.flatten()]
+                # print("="*20)
+                # print((chosen_reward > reject_reward))
+                # print((chosen_reward > reject_reward).float().mean().item())
+                # import pdb; pdb.set_trace()
                 acc += (chosen_reward > reject_reward).float().mean().item()
                 loss_sum += loss.item()
                 step_bar.update()
 
+            # print("Eval acc: ", acc)
             acc_mean = acc / eval_dataloader.__len__()
             loss_mean = loss_sum / eval_dataloader.__len__()
 
             rewards = torch.cat(rewards).float()
-            rewards = self.strategy.all_gather(rewards)
+            # rewards = self.strategy.all_gather(rewards)
             reward_mean = torch.mean(rewards)
             reward_std = torch.std(rewards).clamp(min=1e-8)
 
             # save mean std
-            self.strategy.print("Set reward mean std")
-            unwrap_model = self.strategy._unwrap_model(self.model)
-            unwrap_model.config.mean = reward_mean.item()
-            unwrap_model.config.std = reward_std.item()
+            # print("Set reward mean std")
+            # unwrap_model = self.strategy._unwrap_model(self.model)
+            # unwrap_model.config.mean = reward_mean.item()
+            # unwrap_model.config.std = reward_std.item()
 
             bar_dict = {
                 "eval_loss": loss_mean,
@@ -296,20 +304,22 @@ class RewardModelTrainer(ABC):
                 "reward_mean": reward_mean.item(),
                 "reward_std": reward_std.item(),
             }
-            logs = self.strategy.all_reduce(bar_dict)
-            step_bar.set_postfix(logs)
+            logs = bar_dict
+            # logs = self.strategy.all_reduce(bar_dict)
+            # step_bar.set_postfix(logs)
 
-            histgram = torch.histogram(rewards.cpu(), bins=10, range=(-10, 10), density=True) * 2
-            self.strategy.print("histgram")
-            self.strategy.print(histgram)
+            # histgram = torch.histogram(rewards.cpu(), bins=10, range=(-10, 10), density=True) * 2
+            # self.strategy.print("histgram")
+            # self.strategy.print(histgram)
 
-            if self.strategy.is_rank_0():
-                if self._wandb is not None:
-                    logs = {"eval/%s" % k: v for k, v in {**logs, "global_step": steps}.items()}
-                    self._wandb.log(logs)
-                elif self._tensorboard is not None:
-                    for k, v in logs.items():
-                        self._tensorboard.add_scalar(f"eval/{k}", v, steps)
+            # if self.strategy.is_rank_0():
+            if self._wandb is not None:
+                logs = {"eval/%s" % k: v for k, v in {**logs, "global_step": steps}.items()}
+                print(logs)
+                self._wandb.log(logs)
+                # elif self._tensorboard is not None:
+                #     for k, v in logs.items():
+                #         self._tensorboard.add_scalar(f"eval/{k}", v, steps)
         self.model.train()  # reset model state
 
     def concatenated_forward(self, model, chosen_ids, c_mask, reject_ids, r_mask):

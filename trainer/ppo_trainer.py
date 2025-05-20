@@ -166,10 +166,10 @@ class PPOTrainer(ABC):
             pbar = tqdm(
                 range(len(self.prompts_dataloader)),
                 desc=f"Episode [{episode + 1}/{args.num_episodes}]",
-                disable=False,
             )
 
             for _, rand_prompts, labels in self.prompts_dataloader:
+                # import pdb; pdb.set_trace()
                 experiences = self.experience_maker.make_experience_list(rand_prompts, labels, **self.generate_kwargs)
                 sample0 = self.tokenizer.batch_decode(
                     experiences[0].sequences[0].unsqueeze(0), skip_special_tokens=True
@@ -224,7 +224,9 @@ class PPOTrainer(ABC):
             #     ray.get(self.critic_model_group.async_run_method(method_name="reload_states"))
 
             # ! Training of critic model
+            # import pdb; pdb.set_trace()
             # critic_status_ref = self.critic_model_group.async_run_method(method_name="fit")
+            print("=========== Training critic model")
             self.critic_model_group.fit()
 
             # if self.strategy.args.colocate_all_models or self.strategy.args.deepspeed_enable_sleep:
@@ -239,6 +241,7 @@ class PPOTrainer(ABC):
 
             # ! Training of actor model
             # actor_status_ref = self.actor_model_group.async_run_method(method_name="fit", kl_ctl=self.kl_ctl.value)
+            print("=========== Training actor model")
             self.actor_model_group.fit(kl_ctl=self.kl_ctl.value)
             # status.update(ray.get(actor_status_ref)[0])
 

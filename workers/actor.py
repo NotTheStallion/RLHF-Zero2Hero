@@ -1,13 +1,17 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+
+
+import os
+
 class Actor:
     def __init__(self, model_name: str):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=os.getenv("CACHE_DIR", None))
         self.eos_token = self.tokenizer.eos_token
         self.pad_token = self.tokenizer.pad_token
         
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=os.getenv("CACHE_DIR", None))
 
         self.model.config.pad_token_id = self.model.config.pad_token_id or self.model.config.eos_token_id
     

@@ -9,7 +9,7 @@ def preprocess_data(data, input_template=None, input_key="input", label_key=None
             chat = [{"role": "user", "content": chat}]
         prompt = apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
     else:
-        prompt = data[input_key]
+        prompt = data[input_key][0]["content"]
         if input_template:
             prompt = input_template.format(prompt)
 

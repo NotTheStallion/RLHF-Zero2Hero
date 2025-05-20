@@ -144,7 +144,7 @@ def train(args):
     )
     
     print("Training dataset created successfully")
-    pprint(train_dataset[0])
+    # pprint(train_dataset[0])
 
     # prepare dataloader
     # train_dataloader = strategy.setup_dataloader(

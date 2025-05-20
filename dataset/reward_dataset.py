@@ -34,9 +34,9 @@ def preprocess_data(
             if input_template:
                 prompt = input_template.format(prompt)
         else:
-            prompt = ""
-        chosen = data[chosen_key]
-        rejected = data[rejected_key]
+            prompt = data[chosen_key][0]["content"]
+        chosen = data[chosen_key][1]["content"]
+        rejected = data[rejected_key][1]["content"]
 
     # margin loss
     margin = data["margin"] if exist_and_not_none(data, "margin") else 0
@@ -137,6 +137,8 @@ class RewardDataset(Dataset):
     def __getitem__(self, idx):
         prompt, chosen, reject, extra = self.prompts[idx], self.chosens[idx], self.rejects[idx], self.extras[idx]
 
+        # import pdb ; pdb.set_trace()
+        
         chosen = (prompt + chosen).rstrip("\n")
         if not chosen.endswith(self.tokenizer.eos_token):
             chosen += " " + self.tokenizer.eos_token

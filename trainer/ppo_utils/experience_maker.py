@@ -14,6 +14,14 @@ from models.utils import compute_approx_kl, compute_reward, masked_mean, process
 from utils.logging_utils import init_logger
 
 
+
+
+
+
+
+import os
+
+
 logger = init_logger(__name__)
 
 
@@ -203,6 +211,8 @@ class RemoteExperienceMaker(ABC):
     def tokenize_fn(self, texts, max_length, padding=True, device=None):
         if not padding:
             # when padding is False, return tokenized texts as list
+            # texts = texts[0]
+            # import pdb ; pdb.set_trace()
             return self.tokenizer(
                 texts,
                 add_special_tokens=False,
@@ -281,11 +291,13 @@ class RemoteExperienceMaker(ABC):
         # Batch call reward model
         r_refs = None
         if not self.remote_rm_url:
+            import pdb ; pdb.set_trace()
             r_refs = self.reward_model_group.forward(
-                input_ids=sequences_list,
+                sequences=sequences_list,
                 attention_mask=attention_mask_list,
                 pad_sequence=[True] * len(samples_list),
             )
+            import pdb ; pdb.set_trace()
         # else:
         #     queries_list = sum(
         #         [self.tokenizer.batch_decode(seq, skip_special_tokens=False) for seq in sequences_list], []
@@ -345,7 +357,11 @@ class RemoteExperienceMaker(ABC):
             #     ray.get(r_refs)
             #     ray.get(self.reward_model_group.async_run_method(method_name="empty_cache"))
 
-            value_ref = self.critic_model_group.forward(
+            print(f"sequence list device: {sequences_list.device}")
+            print(f"action mask list device: {action_mask_list.device}")
+            print(f"attention mask list device: {attention_mask_list.device}")
+
+            value_ref = self.critic_model_group.critic.forward(
                 input_ids=sequences_list,
                 action_mask=action_mask_list,
                 attention_mask=attention_mask_list,
@@ -671,6 +687,8 @@ class RemoteExperienceMaker(ABC):
         # vLLM generation
         return self._generate_vllm(all_prompts, all_labels, **generate_kwargs)
 
+
+    # ? implemented function
     @torch.no_grad()
     def _generate_with_hf(self, all_prompts: List[str], all_labels, **generate_kwargs) -> List[Samples]:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -678,9 +696,17 @@ class RemoteExperienceMaker(ABC):
         args = self.args
 
         # Load the Hugging Face model and tokenizer
-        model = self.actor_model_group.to("cuda")
-        # model = AutoModelForCausalLM.from_pretrained(self.args.pretrain).to("cuda")
-        tokenizer = AutoTokenizer.from_pretrained(self.args.pretrain)
+        # model = self.actor_model_group.actor
+        # # model = AutoModelForCausalLM.from_pretrained(self.args.pretrain).to("cuda")
+        # tokenizer = AutoTokenizer.from_pretrained(self.args.pretrain, cache_dir=os.getenv("CACHE_DIR", None))
+        # import pdb ; pdb.set_trace()
+        
+        model = self.initial_model_group.model
+        tokenizer = self.tokenizer
+        
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
 
         sampling_params = {
             "temperature": generate_kwargs.get("temperature", 1.0),
@@ -689,6 +715,7 @@ class RemoteExperienceMaker(ABC):
             "max_length": generate_kwargs.get("max_new_tokens", 1024),
             "min_length": generate_kwargs.get("min_new_tokens", 1),
             "do_sample": True,
+            "bos_token_id": tokenizer.bos_token_id,
             "eos_token_id": tokenizer.eos_token_id,
             "pad_token_id": tokenizer.pad_token_id,
         }
@@ -836,7 +863,7 @@ class RemoteExperienceMaker(ABC):
             all_output_refs.append(llm.get_responses.remote(0))
         all_outputs = sum(ray.get(all_output_refs), [])
 
-        pad_token_id, eos_token_id = self.tokenizer.pad_token_id, self.tokenizer.eos_token_id
+        pad_token_id, eos_token_id = self.tokenizer.pad_token, self.tokenizer.eos_token
 
         # Group outputs by micro_rollout_batch_size
         samples_list = []

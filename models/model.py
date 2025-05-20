@@ -159,6 +159,7 @@ def get_llm_for_sequence_regression(
 
 
 def _get_reward_model(base_pretrained_model, base_llm_model, value_head_prefix="score", packing_samples=False):
+    print("============= Creating reward model =============")
     class RewardModel(base_pretrained_model):
         supports_gradient_checkpointing = True
 
@@ -223,6 +224,7 @@ def _get_reward_model(base_pretrained_model, base_llm_model, value_head_prefix="
 
 
 def _get_critic_model(base_pretrained_model, base_llm_model, value_head_prefix="score", packing_samples=False):
+    print("============= Creating critic model =============")
     class CriticModel(base_pretrained_model):
         supports_gradient_checkpointing = True
 
@@ -267,6 +269,21 @@ def _get_critic_model(base_pretrained_model, base_llm_model, value_head_prefix="
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
 
+            # device = torch.cuda.current_device()
+            # input_ids = input_ids.to(device)
+            # forward_attention_mask = forward_attention_mask.to(device)
+            # position_ids = position_ids.to(device)
+            # # Move the model to the appropriate device
+            # self.to(device)
+            
+            
+            # Log the devices of input variables for debugging
+            print(f"input_ids device: {input_ids.device}")
+            print(f"forward_attention_mask device: {forward_attention_mask.device}")
+            print(f"position_ids device: {position_ids.device}")
+            print(f"model device: {next(self.parameters()).device}")
+            
+            
             outputs = getattr(self, self.base_model_prefix)(
                 input_ids, attention_mask=forward_attention_mask, position_ids=position_ids
             )

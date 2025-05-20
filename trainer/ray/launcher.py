@@ -5,13 +5,14 @@ from typing import Dict, Optional, Type
 
 import ray
 import torch
-from ray.util.placement_group import PlacementGroup, placement_group
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+# from ray.util.placement_group import PlacementGroup, placement_group
+# from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tqdm import tqdm
 
-from openrlhf.models import Actor, get_llm_for_sequence_regression
-from openrlhf.trainer.ray.utils import ray_noset_visible_devices
-from openrlhf.utils.deepspeed import DeepspeedStrategy
+from models.actor import Actor
+from models.model import get_llm_for_sequence_regression
+from trainer.ray.utils import ray_noset_visible_devices
+# from utils.deepspeed import DeepspeedStrategy
 
 
 class DistributedTorchRayActor:
@@ -52,7 +53,7 @@ class DistributedTorchRayActor:
 
 
 class BasePPORole(DistributedTorchRayActor):
-    def _setup_distributed(self, strategy: DeepspeedStrategy):
+    def _setup_distributed(self, strategy):
         # configure strategy
         self.strategy = strategy
         strategy.setup_distributed()
@@ -101,26 +102,29 @@ class BasePPORole(DistributedTorchRayActor):
         return results
 
 
-@ray.remote(num_gpus=1)
-class ReferenceModelRayActor(BasePPORole):
-    def init_model_from_pretrained(self, strategy: DeepspeedStrategy, pretrain):
-        self._setup_distributed(strategy)
+
+class ReferenceModelRayActor():
+    def __init__(self, strategy_args, pretrain):
+        # self._setup_distributed(strategy)
+        print("============= Creating Refrence using next actor model =============")
         model = Actor(
             pretrain,
-            use_flash_attention_2=strategy.args.flash_attn,
-            bf16=strategy.args.bf16,
-            load_in_4bit=strategy.args.load_in_4bit,
-            ds_config=strategy.get_ds_eval_config(offload=strategy.args.ref_reward_offload),
-            packing_samples=strategy.args.packing_samples,
-            temperature=strategy.args.temperature,
-            use_liger_kernel=strategy.args.use_liger_kernel,
+            use_flash_attention_2=strategy_args.flash_attn,
+            bf16=strategy_args.bf16,
+            load_in_4bit=strategy_args.load_in_4bit,
+            ds_config=False,
+            packing_samples=strategy_args.packing_samples,
+            temperature=strategy_args.temperature,
+            use_liger_kernel=strategy_args.use_liger_kernel,
+            device_map="auto"
         )
-        strategy.print(model)
+        print(model)
 
-        if strategy.args.ref_reward_offload:
-            model._offload = True
+        # if strategy_args.args.ref_reward_offload:
+        #     model._offload = True
 
-        self.model = self.strategy.prepare(model, is_rlhf=True)
+        # self.model = self.strategy.prepare(model, is_rlhf=True)
+        self.model = model
         self.model.eval()
 
     def forward(
@@ -128,7 +132,7 @@ class ReferenceModelRayActor(BasePPORole):
         sequences: torch.LongTensor,
         action_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        return_output=False,
+        return_output=False, # ? unused param
         packed_seq_lens: Optional[list[int]] = None,
     ) -> torch.Tensor:
         device = torch.cuda.current_device()
@@ -137,35 +141,36 @@ class ReferenceModelRayActor(BasePPORole):
                 sequences.to(device),
                 action_mask.to(device),
                 attention_mask.to(device),
-                ring_attn_group=self.strategy.ring_attn_group,
+                # ring_attn_group=False,
                 packed_seq_lens=packed_seq_lens,
             )
         return log_probs.to("cpu")
 
 
-@ray.remote(num_gpus=1)
-class RewardModelRayActor(BasePPORole):
-    def init_model_from_pretrained(self, strategy: DeepspeedStrategy, pretrain):
-        self._setup_distributed(strategy)
+class RewardModelRayActor():
+    def __init__(self, strategy_args, pretrain):
+        # self._setup_distributed(strategy_args)
         model = get_llm_for_sequence_regression(
             pretrain,
             "reward",
-            normalize_reward=strategy.args.normalize_reward,
-            use_flash_attention_2=strategy.args.flash_attn,
-            bf16=strategy.args.bf16,
-            load_in_4bit=strategy.args.load_in_4bit,
-            ds_config=strategy.get_ds_eval_config(offload=strategy.args.ref_reward_offload),
-            value_head_prefix=strategy.args.value_head_prefix,
-            packing_samples=strategy.args.packing_samples,
+            normalize_reward=strategy_args.normalize_reward,
+            use_flash_attention_2=strategy_args.flash_attn,
+            bf16=strategy_args.bf16,
+            load_in_4bit=strategy_args.load_in_4bit,
+            # ds_config=False,
+            value_head_prefix=strategy_args.value_head_prefix,
+            packing_samples=strategy_args.packing_samples,
+            device_map="auto"
         )
-        strategy.print(model)
-        strategy.print("reward normalization status: {}".format(strategy.args.normalize_reward))
-        strategy.print("mean: {}, std {}".format(model.mean, model.std))
+        print(model)
+        print("reward normalization status: {}".format(strategy_args.normalize_reward))
+        print("mean: {}, std {}".format(model.mean, model.std))
 
-        if strategy.args.ref_reward_offload:
-            model._offload = True
+        # if strategy_args.ref_reward_offload:
+        #     model._offload = True
 
-        self.model = self.strategy.prepare(model, is_rlhf=True)
+        # self.model = self.strategy.prepare(model, is_rlhf=True)
+        self.model = model
         self.model.eval()
 
     def forward(
@@ -180,8 +185,8 @@ class RewardModelRayActor(BasePPORole):
             reward = self.model(
                 sequences.to(device),
                 attention_mask.to(device),
-                ring_attn_group=self.strategy.ring_attn_group,
-                pad_sequence=True,
+                ring_attn_group=False, #self.strategy_args.ring_attn_group,
+                pad_sequence=True, # ? pad sequence use
                 packed_seq_lens=packed_seq_lens,
             )
         return reward.to("cpu")
@@ -207,7 +212,7 @@ class PPORayActorGroup:
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[BasePPORole],
-        pg: PlacementGroup = None,
+        pg = None,
         num_gpus_per_actor=1,
         duplicate_actors: int = 1,
         resources: Dict[str, float] = None,
@@ -231,23 +236,25 @@ class PPORayActorGroup:
         # Use placement group to lock resources for models of same type
         if self._num_gpus_per_node > 1 and pg is None:
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(self._num_nodes * self._num_gpus_per_node)]
-            if self._resources:
-                resources_name = list(self._resources.keys())[0]
-                for i in range(len(bundles)):
-                    bundles[i][resources_name] = self._num_resources_per_node
+            # if self._resources:
+            #     resources_name = list(self._resources.keys())[0]
+            #     for i in range(len(bundles)):
+            #         bundles[i][resources_name] = self._num_resources_per_node
 
-            pg = placement_group(bundles, strategy="PACK")
-            ray.get(pg.ready())
+            # pg = placement_group(bundles, strategy="PACK")
+            # ray.get(pg.ready())
         if pg:
-            master_actor = self.ray_actor_type.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                resources=self._resources,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg, placement_group_bundle_index=0
-                ),
-            ).remote(world_size, 0, None, None)
+            print("Using placement group for actor scheduling")
+            # master_actor = self.ray_actor_type.options(
+            #     num_cpus=num_gpus_per_actor,
+            #     num_gpus=num_gpus_per_actor,
+            #     resources=self._resources,
+            #     scheduling_strategy=PlacementGroupSchedulingStrategy(
+            #         placement_group=pg, placement_group_bundle_index=0
+            #     ),
+            # ).remote(world_size, 0, None, None)
         else:
+            print("Using default scheduling for actor scheduling")
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
@@ -256,26 +263,26 @@ class PPORayActorGroup:
         self._actor_handlers = [master_actor]
 
         # Create worker actors
-        if world_size > 1:
-            master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
-            for rank in range(1, world_size):
-                if pg:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                        scheduling_strategy=PlacementGroupSchedulingStrategy(
-                            placement_group=pg,
-                            placement_group_bundle_index=rank,
-                        ),
-                    ).remote(world_size, rank, master_addr, master_port)
-                else:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                    ).remote(world_size, rank, master_addr, master_port)
-                self._actor_handlers.append(worker_actor)
+        # if world_size > 1:
+        #     master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
+        #     for rank in range(1, world_size):
+        #         if pg:
+        #             worker_actor = self.ray_actor_type.options(
+        #                 num_cpus=num_gpus_per_actor,
+        #                 num_gpus=num_gpus_per_actor,
+        #                 resources=self._resources,
+        #                 scheduling_strategy=PlacementGroupSchedulingStrategy(
+        #                     placement_group=pg,
+        #                     placement_group_bundle_index=rank,
+        #                 ),
+        #             ).remote(world_size, rank, master_addr, master_port)
+        #         else:
+        #             worker_actor = self.ray_actor_type.options(
+        #                 num_cpus=num_gpus_per_actor,
+        #                 num_gpus=num_gpus_per_actor,
+        #                 resources=self._resources,
+        #             ).remote(world_size, rank, master_addr, master_port)
+        #         self._actor_handlers.append(worker_actor)
 
     def async_init_model_from_pretrained(
         self,

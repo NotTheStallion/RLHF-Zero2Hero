@@ -31,7 +31,7 @@ def ensure_hf_repo_exists(repo_name, local_dir, token=None):
     
 if __name__ == "__main__":
     # Example usage
-    repo_name = "NotTheStallion/llama3-1.7B-RewardModel"  # Replace with your repo name
-    local_dir = "./checkpoint/llama3-1.7b-rm"  # Replace with your local directory
+    repo_name = "NotTheStallion/llama3-3.2-1b-RewardModel"  # Replace with your repo name
+    local_dir = "../llama3-3.2-1b-rm"  # Replace with your local directory
 
     ensure_hf_repo_exists(repo_name, local_dir)

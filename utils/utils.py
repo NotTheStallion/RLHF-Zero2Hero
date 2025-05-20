@@ -14,6 +14,9 @@ def get_tokenizer(pretrain, model, padding_side="left", strategy=None, use_fast=
         tokenizer.pad_token_id = tokenizer.eos_token_id
         if model is not None:
             model.config.pad_token_id = tokenizer.pad_token_id
+            
+    # tokenizer.eos_token_id = tokenizer.eos_token
+    # tokenizer.bos_token_id = tokenizer.bos_token
 
     return tokenizer
 
