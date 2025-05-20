@@ -87,7 +87,7 @@ class CriticPPOTrainer(ABC):
             for experience in pbar:
                 experience.to_device(device)
                 status = self.training_step(experience)
-                experience.to_device("cpu")
+                # experience.to_device("cpu")
 
                 # for DP
                 # status = self.strategy.all_reduce(status)
