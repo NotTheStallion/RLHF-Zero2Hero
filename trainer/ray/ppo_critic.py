@@ -312,3 +312,7 @@ class CriticModelRayActor():
 
     # def offload_states(self):
     #     offload_deepspeed_states(self.critic)
+    
+    def empty_cache(self) -> None:
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()

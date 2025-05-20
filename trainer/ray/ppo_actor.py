@@ -550,3 +550,7 @@ class ActorModelRayActor():
             )
         # wait
         # torch_dist_barrier_and_cuda_sync()
+    
+    def empty_cache(self) -> None:
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()

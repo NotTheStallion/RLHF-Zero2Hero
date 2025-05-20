@@ -145,6 +145,10 @@ class ReferenceModelRayActor():
                 packed_seq_lens=packed_seq_lens,
             )
         return log_probs.to("cpu")
+    
+    def empty_cache(self) -> None:
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 class RewardModelRayActor():
@@ -190,6 +194,10 @@ class RewardModelRayActor():
                 packed_seq_lens=packed_seq_lens,
             )
         return reward.to("cpu")
+    
+    def empty_cache(self) -> None:
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 class PPORayActorGroup:

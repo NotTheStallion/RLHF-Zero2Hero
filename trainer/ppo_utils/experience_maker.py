@@ -297,6 +297,9 @@ class RemoteExperienceMaker(ABC):
                 attention_mask=attention_mask_list,
                 pad_sequence=[True] * len(samples_list),
             )
+        
+        
+            self.reward_model_group.empty_cache()
             import pdb ; pdb.set_trace()
         # else:
         #     queries_list = sum(
@@ -340,11 +343,14 @@ class RemoteExperienceMaker(ABC):
         #     ray.get(self.reward_model_group.async_run_method(method_name="empty_cache"))
 
         # Batch call actor model
+        import pdb ; pdb.set_trace(header="Call for actor in make_experience")
         action_log_probs_ref = self.actor_model_group.forward(
             sequences=sequences_list,
             action_mask=action_mask_list,
             attention_mask=attention_mask_list,
         )
+        
+        self.actor_model_group.empty_cache()
 
         # # Sync to avoid GPU OOM when colocate models
         # if args.colocate_all_models or args.colocate_actor_ref:
@@ -366,6 +372,8 @@ class RemoteExperienceMaker(ABC):
                 action_mask=action_mask_list,
                 attention_mask=attention_mask_list,
             )
+            
+            self.critic_model_group.empty_cache()
             # if args.colocate_all_models or args.colocate_critic_reward:
             #     ray.get(value_ref)
             #     ray.get(self.critic_model_group.async_run_method(method_name="empty_cache"))
@@ -383,6 +391,8 @@ class RemoteExperienceMaker(ABC):
                 action_mask=action_mask_list,
                 attention_mask=attention_mask_list,
             )
+            
+            self.initial_model_group.empty_cache()
 
         #     if args.colocate_all_models or args.colocate_actor_ref:
         #         ray.get(base_action_log_probs_ref)
