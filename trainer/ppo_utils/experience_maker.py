@@ -367,8 +367,8 @@ class RemoteExperienceMaker(ABC):
             print(f"action mask list device: {action_mask_list.device}")
             print(f"attention mask list device: {attention_mask_list.device}")
 
-            value_ref = self.critic_model_group.critic.forward(
-                input_ids=sequences_list,
+            value_ref = self.critic_model_group.forward(
+                sequences=sequences_list,
                 action_mask=action_mask_list,
                 attention_mask=attention_mask_list,
             )
@@ -816,9 +816,9 @@ class RemoteExperienceMaker(ABC):
             sequences, attention_mask, action_mask = process_sequences(
                 sequences, batch_max_input_len, eos_token_id, pad_token_id
             )
-            sequences = sequences.to("cuda")
-            attention_mask = attention_mask.to("cuda")
-            action_mask = action_mask.to("cuda")
+            sequences = sequences.to("cpu")
+            attention_mask = attention_mask.to("cpu")
+            action_mask = action_mask.to("cpu")
             response_length = action_mask.float().sum(dim=-1)
             total_length = attention_mask.float().sum(dim=-1)
 
